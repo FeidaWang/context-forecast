@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- README rewritten for newcomers, with a Simplified Chinese README (README.zh-CN.md); PRIVACY.md notes the desktop `/compact` path.
+
 ## 0.2.2
 
 - Planner footer mirrors the main card: ‹ Back at the bottom left (as Close), Compact now at the right; Copy moved beside the planner's title; toggles one a line; the folded forecast above keeps only header, hero and bar; the confirm button reads "Confirm compact" (the size is in the estimate row above).

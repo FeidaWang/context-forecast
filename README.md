@@ -1,100 +1,127 @@
 # Context Forecast
 
-A weather forecast for your Claude Code context window. Instead of a raw token count, you get a condition you can read at a glance, and a warning *before* auto-compaction hits.
+English | [简体中文](README.zh-CN.md)
 
-## What you see
+**A weather forecast for Claude's memory.** It tells you, at a glance, how much room Claude has left in this conversation, and warns you *before* Claude has to squeeze it.
 
-A one-line band above the prompt answers one question: how much room is left. It shows the condition, then the turns until auto-compact (or, with room to spare, the share of the way there; press it to open the forecast), a gauge toward the threshold and the size behind it (`368k / 800k`). By default the band is **auto**: while there is nothing to act on (Clear, or more than 99 turns left, and no plan limit past 75%) the weather waits in the prompt footer as `☁ 46%`, styled like the model and effort labels beside it; press it (or run the command) to bring the band back, and it comes back by itself when it matters. A plan limit appears only past 50%, with its reset time. In Rain the band offers **Plan compact**; in Storm that becomes a row of its own. Right after a compaction it shows what it freed (`Compacted · 720k → 85k`). Cost and per-turn figures live in the forecast pane. **Minimize** tucks the weather into the prompt footer; **Hide** removes it until you run the command again.
+## The idea in 30 seconds
 
-| Condition | Context used (of the auto-compact threshold) | Meaning |
+- Claude can only keep so much of a conversation in mind at once. That space is called the **context window**. Every message, file it reads and tool result fills it up a little more.
+- When it gets nearly full, Claude Code **auto-compacts**: it replaces the older conversation with a short summary to make room. That works, but details can get lost, and it usually happens at a moment you didn't choose.
+- Context Forecast turns "how full is it?" into **weather**, and guesses **how many more turns** you have before auto-compact. When the sky darkens, it helps you compact **on your terms**, keeping what matters.
+
+| Weather | How full (on the way to auto-compact) | What it means for you |
 | --- | --- | --- |
-| ☀️ Clear | under 30% | plenty of room |
-| ☁️ Cloudy | 30–60% | filling up |
-| 🌧️ Rain | 60–85% | compaction ahead |
-| ⛈️ Storm | 85%+ | compaction imminent |
-| 🌈 Clearing | just compacted | fresh room |
-
-**Turns left** = room to the auto-compact threshold ÷ growth per turn, where growth is the **median of the last ≤8 turn-to-turn deltas since the last compaction**, negative deltas left out. A single big file read barely moves it. Past 99 turns (or with no growth) it shows the share of the way to auto-compact instead of a count; until it has seen a turn grow, it says "Measuring growth".
-
-### The forecast pane
-
-`/weather forecast` opens a pane (≈360px wide on desktop), top to bottom:
-
-1. **Header**: condition, model, used / window.
-2. **Hero**: "~N turns left" to auto-compact, the threshold and typical growth.
-3. **Context bar**: one segment per category, the auto-compact reserve gray at the end.
-4. **What's in context**: tokens per category. An MCP server with ≥5k of schemas and no calls this session is flagged; **Disable…** copies `/mcp` for you to paste (servers the app itself provides are flagged without it, since /mcp cannot turn them off).
-5. **Prompt cache**: warm/cold with the time left of its TTL (minutes, then seconds in the last five), read %, tokens written last turn, and what a cold cache would re-write.
-6. **Subagents**: each run's context → what it handed back, and the total kept out of the main context. Press a row to open that subagent's transcript.
-7. **Limits**: 5-hour and weekly usage with reset times; session cost at API rates (**API cost**).
-8. **Plan compact** button: quiet in Clear/Cloudy, primary in Rain, full width with a warning in Storm.
-
-The button opens the **compact planner** card and moves the focus to it (beside the main card when the pane is wide enough; under it otherwise, with the main card folded to its top block): Keep (☑/☐) and Drop (☒/☐) toggles derived from the session (task and plan, files edited, decisions, failing test output, user preferences, old search results, large file dumps), the `/compact` instructions they make (**Copy**, beside the card's title, puts the command on your clipboard), a field to add an instruction of your own, the size after compacting, the best moment (idle, cache warm), and at the foot **‹ Back** (left, as the main card's Close) and **Compact now** (right; asks once, then compacts with those instructions; in the desktop app and other headless hosts it runs `/compact` as you would; waits while a turn runs). Under it, **Next move**: up to three suggestions, each only when its rule fires (last 3 turns read >30k of files → Explore subagent; CLAUDE.md >8k → move sections into a skill; topic shift → new session with its starting size).
-
-Figures marked ~ are estimates. Sections with no data (no subagents, no plan limits off a subscription, unknown cache TTL) are hidden.
-
-### Where each number comes from
-
-| Panel figure | Source |
-| --- | --- |
-| Used / window, % used | `$.session.usage()` → `context.tokens`, `context.window` (the status line's figures) |
-| Model (shown as /model names it), auto-compact threshold, bar length, reserve | `$.session.usage({ breakdown: 'summary' })` → `breakdown.model`, `autoCompactThreshold`, `rawMaxTokens`, the `buffer` category |
-| What's in context | `breakdown.categories` (used rows), folded into groups |
-| MCP schema size per server | `breakdown.mcpTools` (loaded schemas) by `serverName` |
-| MCP calls | `mcp__<server>__*` tool calls: counted live (`tool.call`) and in `$.session.messages()` |
-| CLAUDE.md size | `breakdown.memoryFiles` named `CLAUDE.md` |
-| Growth, turns left | each main-thread request's usage (`turn.step`) and turn ends (`session.measure`); history rebuilt from the transcript |
-| Cache read %, written last turn | last request's `cache_read/creation_input_tokens` (`turn.step`, `turn.complete`) |
-| Cache TTL | the transcript's `usage.cache_creation.ephemeral_1h/5m_input_tokens`; for a transcript over the 4 MiB read bound, the cache's behaviour across an idle gap (read after >5 min idle → 1h; re-written inside the hour → 5m) |
-| Cache countdown | time of the last main-thread response + TTL |
-| Subagents | `$.agent.list()` (type, description); each agent's `turn.step` usage (its largest context); its `turn.complete` answer (≈ chars ÷ 4); earlier runs from the session's `subagents/agent-*.meta.json` and `.jsonl` |
-| Limits | `usage.rateLimits` (`five_hour`, `seven_day`: `percentUsed`, `resetsAt`) |
-| Session cost | `usage.cost.usd` (API-equivalent) |
-| Planner chips, next-move rules | `$.session.messages()` (since the last compaction): tool names, inputs and result sizes |
-| After-compact estimate | ≈ non-message context + a summary of a tenth of the messages (3k–20k) + anything kept verbatim |
+| ☀️ Clear | under 30% | Lots of room. Carry on. |
+| ☁️ Cloudy | 30–60% | Filling up. Nothing to do yet. |
+| 🌧️ Rain | 60–85% | Auto-compact is coming. A good time to plan one yourself. |
+| ⛈️ Storm | 85% or more | Auto-compact is about to happen. Compact now if you care what's kept. |
+| 🌈 Clearing | just compacted | Fresh room again. |
 
 ## Install
+
+In Claude Code, type these two lines:
 
 ```
 /plugin marketplace add FeidaWang/context-forecast
 /plugin install context-forecast@context-forecast
 ```
 
-Restart Claude Code to apply.
+Then restart Claude Code. That's it: the weather shows up by itself after Claude's first reply.
+
+Works in the Claude Code terminal and the Claude desktop app (Code tab). It does nothing in regular chat or Cowork.
+
+## Using it
+
+### 1. Glance at the weather
+
+While things are calm, the weather sits quietly at the bottom of the prompt box, next to the model name, like `☀ 17%`. Press it to see more.
+
+When it's worth watching (from Cloudy on, once fewer than 100 turns are left; or a usage limit past 75%), a **one-line band** appears above the prompt by itself. It reads like:
+
+> 🌧️ Rain · ~12 turns until auto-compact › &nbsp; ▬▬▬▬▬▬▭ 610k / 1M
+
+- **~12 turns** is the forecast: about how many more back-and-forths fit before auto-compact.
+- The bar and `610k / 1M` show how full it is (k = thousand tokens, roughly ¾ of a word each).
+- Press the line to open the full forecast. **Minimize** tucks it back into the footer; **Hide** removes it.
+- In Rain and Storm the band also offers **Plan compact**.
+
+### 2. Open the forecast
+
+Press the band, or type `/weather forecast`. A side pane opens with, from top to bottom:
+
+- **The headline**: today's weather, the model, how much is used, and "~N turns left" (or "17% to auto-compact" when there's plenty of room).
+- **What's in context**: what is taking up the space (your conversation, tools, CLAUDE.md, MCP servers…), each with a small bar. If an MCP server takes a lot of space and was never used, it's pointed out, with a **Disable…** button that copies the `/mcp` command for you.
+- **Prompt cache**: Claude Code reuses recent context cheaply for a short while (5 minutes or 1 hour). This shows whether it's still warm and how long until it goes cold. Replying while it's warm is cheaper and faster.
+- **Subagents**: helpers Claude sent off to do work (like searching the code). Each shows how much it read and how little it brought back, which is space saved in your main conversation. **View** opens what it did.
+- **Usage**: your plan's 5-hour and weekly limits with reset times, and **API cost**, what this session would have cost at API prices.
+- **Plan compact**: opens the planner.
+
+### 3. Compact on your terms
+
+**Plan compact** opens the **compact planner**:
+
+1. **Keep** and **Drop**: tick what the summary must keep (current task and plan, files edited, decisions made, your preferences…) and what it can throw away (old search results, large file dumps…). The choices are suggested from your own session.
+2. The box shows the exact `/compact` instruction that will be used. **Copy** (next to the title) puts it on your clipboard. You can **add an instruction** of your own.
+3. **Estimated after compact** shows the size before → after. **Best moment** tells you if now is a good time (for example, Claude isn't busy and the cache is warm).
+4. **Compact now** asks once ("Confirm compact"), then compacts with your instructions. If Claude is in the middle of a reply, it waits. **‹ Back** returns to the forecast.
+
+Under it, **Next move** may suggest up to three habits that save room, each only when it applies. For example: hand broad code searches to an Explore subagent, move a long CLAUDE.md into a skill, or start a new session when the topic changes.
 
 ## Commands
 
-| Command | Does |
+| Type this | What happens |
 | --- | --- |
-| `/weather` | Always show the band (from any state) |
-| `/weather forecast` | Open or close the forecast pane and compact planner |
-| `/weather debug` | Toggle a preview picker in the pane: Live, Clear, Cloudy, Storm, Planner (fixture data); `/weather debug storm` jumps to one |
-| `/weather auto` | The default: footer while calm, band when it matters |
-| `/weather mini` | Keep the weather in the prompt footer |
+| `/weather` | Show the band above the prompt |
+| `/weather forecast` | Open or close the forecast pane |
+| `/weather auto` | The default: weather in the footer while calm, band when it matters |
+| `/weather mini` | Always keep the weather small, in the footer |
 | `/weather hide` | Hide it; `/weather` brings it back |
 
-If another plugin already owns `/weather` (for example the original `token-weather` sample mod), the same command registers as `/context-forecast` instead: `/context-forecast forecast`, `/context-forecast debug storm`, and so on.
+If another plugin already uses `/weather`, the command is `/context-forecast` instead (for example `/context-forecast forecast`).
 
-The band also has Forecast, minimize and hide buttons. On the terminal, `f` and `m` are hotkeys for Forecast and minimize.
+On the terminal, a few keys work when the band or pane has focus: `f` forecast, `m` minimize, `c` plan compact, `b` back.
 
-## Works on
+## Good to know
 
-Claude Code terminal and desktop surfaces. It is a Claude Code *mod* (UI and hooks), so it has no effect in chat or Cowork.
+- Numbers with `~` are estimates.
+- The turn forecast is based on how much each recent turn added (the middle value of the last 8 turns, so one huge file read doesn't throw it off). Until it has seen a few turns, it says "Measuring growth".
+- Sections with nothing to show (no subagents, no plan limits, unknown cache time) are hidden.
 
-## What it reads, runs, and sends
+## Privacy: what it reads, runs and sends
 
-Everything runs locally. The mod sends nothing anywhere: it makes no network requests, bundles no MCP server, and calls no model.
+Everything runs on your computer. Context Forecast **sends nothing anywhere**: no network requests, no bundled MCP server, no model calls.
 
-- **Reads session usage.** The context size, window, rate-limit percentages and session cost that Claude Code reports for the current session (`$.session.usage`).
-- **Reads two environment variables, `HOME` and `CLAUDE_CONFIG_DIR`**, only to work out where Claude Code keeps the current session's transcript (`<config dir>/projects/<project>/<session id>.jsonl`). No credential or secret is read, and the values are never stored or sent.
-- **Reads the current session's transcript file** (`$.fs.read`) when a session starts and after each turn, for the token history and the prompt-cache TTL (transcripts over the 4 MiB file-read limit are skipped). Only token counts, cache-write splits, request ids and timestamps are used. Subagent records in the session's `subagents/` folder are read for agent type and token counts.
-- **Reads the conversation** (`$.session.messages()`) after each turn, to count tool calls, edited files, searches, large tool results and test failures, and to compare prompt keywords for a topic shift. Only counts and sizes are kept; message text and file paths are not stored or shown.
-- **Compacts only when you press Compact now** (`$.session.compact`), with the instructions shown in the preview; **Copy** writes that `/compact` command to your clipboard.
-- **Runs no programs.** The mod starts no processes and makes no shell calls.
-- **Handles the `/weather` command itself** (`forecast`, `mini`, `hide`, or no argument). It does not touch permissions, agents, settings, or Remote Control.
-- **Keeps state** (recent token samples, last reading, cache and subagent counts, planner choices, display mode) in Claude Code's own plugin state.
+- **Reads session usage**: the context size, window, rate-limit percentages and session cost Claude Code reports for the current session (`$.session.usage`).
+- **Reads two environment variables, `HOME` and `CLAUDE_CONFIG_DIR`**, only to find the current session's transcript (`<config dir>/projects/<project>/<session id>.jsonl`). No credential or secret is read; the values are never stored or sent.
+- **Reads the current session's transcript file** (`$.fs.read`) when a session starts and after each turn, for the token history and the prompt-cache lifetime (files over 4 MiB are skipped). Only token counts, cache figures, request ids and timestamps are used. Subagent records in the session's `subagents/` folder are read for agent type and token counts.
+- **Reads the conversation** (`$.session.messages()`) after each turn, to count tool calls, edited files, searches, large results and test failures, and to notice a topic change. Only counts and sizes are kept; message text and file paths are never stored or shown.
+- **Compacts only when you press Compact now** (`$.session.compact`; in the desktop app, where that isn't available, it runs `/compact` just as you would type it), with the instructions shown in the planner. **Copy** writes that `/compact` command to your clipboard.
+- **Runs no programs**: no processes, no shell commands.
+- **Handles only its own `/weather` command.** It doesn't touch permissions, agents, settings or Remote Control.
+- **Keeps a little state** (recent token samples, last reading, cache and subagent counts, planner choices, display mode) in Claude Code's own plugin state.
 
-See [PRIVACY.md](PRIVACY.md) for the data-handling summary.
+See [PRIVACY.md](PRIVACY.md).
+
+## For the curious: where each number comes from
+
+| Figure | Source |
+| --- | --- |
+| Used / window | `$.session.usage()` → `context.tokens`, `context.window` (the status line's figures) |
+| Model, auto-compact threshold, bar length, reserve | `$.session.usage({ breakdown: 'summary' })` → `breakdown.model`, `autoCompactThreshold`, `rawMaxTokens`, the `buffer` category |
+| What's in context | `breakdown.categories`, folded into groups |
+| MCP space per server | `breakdown.mcpTools` by `serverName` |
+| MCP calls | `mcp__<server>__*` tool calls, counted live (`tool.call`) and in `$.session.messages()` |
+| CLAUDE.md size | `breakdown.memoryFiles` named `CLAUDE.md` |
+| Growth, turns left | each main-thread request's usage (`turn.step`) and turn ends (`session.measure`); history rebuilt from the transcript |
+| Cache read %, written last turn | last request's `cache_read/creation_input_tokens` (`turn.step`, `turn.complete`) |
+| Cache lifetime | the transcript's `usage.cache_creation.ephemeral_1h/5m_input_tokens`; for a transcript over 4 MiB, the cache's behaviour across an idle gap (read after >5 min idle → 1h; re-written inside the hour → 5m) |
+| Cache countdown | time of the last main-thread response + lifetime |
+| Subagents | `$.agent.list()` (type, description); each agent's `turn.step` usage (its largest context); its `turn.complete` answer (≈ characters ÷ 4); earlier runs from the session's `subagents/agent-*.meta.json` and `.jsonl` |
+| Usage limits | `usage.rateLimits` (`five_hour`, `seven_day`: `percentUsed`, `resetsAt`) |
+| API cost | `usage.cost.usd` |
+| Planner choices, next-move tips | `$.session.messages()` since the last compaction: tool names, inputs and result sizes |
+| After-compact estimate | ≈ non-message context + a summary of about a tenth of the messages (3k–20k) + anything kept word for word |
 
 ## Development
 
@@ -104,10 +131,10 @@ claude plugin test .          # unit and UI tests
 ./scripts/preflight.sh        # everything the directory's checks look at
 ```
 
-Source: `hooks/forecast.ts` (levels, growth, turns left), `hooks/insights.ts` (context groups, MCP, planner, next-move rules), `hooks/panel.ts` (the pane's figures), `hooks/pane.tsx` (the pane and planner), `hooks/fixtures.ts` (debug previews), `hooks/history.ts` (transcript parsing), `hooks/sky.ts` (animated icons), `hooks/register.tsx` (events, band and `/weather`).
+Source: `hooks/forecast.ts` (weather, growth, turns left), `hooks/band.ts` (the band above the prompt), `hooks/insights.ts` (context groups, MCP, planner, next-move tips), `hooks/panel.ts` (the pane's figures), `hooks/pane.tsx` (drawing the pane and planner), `hooks/icons.ts` (section icons), `hooks/sky.ts` (animated weather), `hooks/history.ts` (reading the transcript), `hooks/fixtures.ts` (preview data), `hooks/register.tsx` (events, band, footer and `/weather`).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Section icons are from [Lucide](https://lucide.dev) (ISC).
 
 Context Forecast is derived from the `token-weather` sample mod in [anthropics/claude-code-playground](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/token-weather) (Apache-2.0). It is an independent project, not an Anthropic product.

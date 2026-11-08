@@ -115,6 +115,8 @@ declare module 'claude-code' {
       isConfirming: boolean
       // An instruction the person typed, appended to the planned ones.
       extraInstruction: string
+      // This session's transcript, as Claude Code hands it to its hooks.
+      transcriptPath: string | null
     }
   }
 }

@@ -20,7 +20,7 @@ import {
 } from './forecast'
 import type { Forecast, Level } from './forecast'
 import { SKY_COLUMNS, skyCells, skySvg } from './sky'
-import { lastCacheTtl, parseTranscript, subagentPeak, transcriptPath } from './history'
+import { lastCacheTtl, parseTranscript, subagentPeak } from './history'
 import { inferTtl } from './history'
 import { groupCategories, compactCommand, scanSession, serverOfTool, tokensOf } from './insights'
 import { buildPanel } from './panel'
@@ -46,6 +46,7 @@ const debugOnAtom = atom({ plugin: 'context-forecast', key: 'isDebugOn' } as con
 const debugAtom = atom({ plugin: 'context-forecast', key: 'debug' } as const, null as DebugState)
 const confirmAtom = atom({ plugin: 'context-forecast', key: 'isConfirming' } as const, false)
 const extraAtom = atom({ plugin: 'context-forecast', key: 'extraInstruction' } as const, '')
+const transcriptAtom = atom({ plugin: 'context-forecast', key: 'transcriptPath' } as const, null as string | null)
 // The name `/weather` registered under (another plugin may hold `weather`).
 let commandName = 'weather'
 const runningAtom = atom({ plugin: 'context-forecast', key: 'isTurnRunning' } as const, false)
@@ -74,22 +75,22 @@ async function animateSky($: Api): Promise<void> {
 
 // ---- gathering ------------------------------------------------------------------
 
-// Where this session's transcript is, or null.
+// Where this session's transcript is, or null: the path Claude Code hands its
+// own hooks (`transcript_path`), kept when one of them runs. No environment
+// variable is read to work it out.
 async function findTranscript($: Api): Promise<string | null> {
-  const [id, cwd, root, configDir, home] = await Promise.all([
-    $.session.id(),
-    $.session.cwd(),
-    $.session.root(),
-    $.env.get('CLAUDE_CONFIG_DIR'),
-    $.env.get('HOME'),
-  ])
-  const dir = configDir ?? (home ? `${home}/.claude` : null)
-  if (!dir) return null
-  for (const base of [root, cwd]) {
-    const p = transcriptPath(dir, base, id)
-    if (await $.fs.exists(p)) return p
-  }
-  return null
+  const path = await read($, transcriptAtom)
+  return path && (await $.fs.exists(path)) ? path : null
+}
+
+// Keeps the transcript path the first time a classic hook carries it, and
+// builds the history from it then.
+async function noteTranscript($: Api, path: string | undefined): Promise<void> {
+  if (!path) return
+  const known = await read($, transcriptAtom)
+  if (known === path) return
+  await update($, transcriptAtom, () => path)
+  await backfill($)
 }
 
 // Rebuilds the history from this session's transcript, so a resumed session or
@@ -443,7 +444,23 @@ export function register(on: Parameters<Register>[0]): void {
     return next(e)
   })
 
-  // A compaction restarts the forecast from what it left.
+  // Claude Code hands every classic hook the session's transcript path; these
+  // three only note it and pass the event on unchanged.
+  on('classic.SessionStart', async ($, e, next) => {
+    await noteTranscript($, e.transcript_path)
+    return next(e)
+  })
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    await noteTranscript($, e.transcript_path)
+    return next(e)
+  })
+  on('classic.Stop', async ($, e, next) => {
+    await noteTranscript($, e.transcript_path)
+    return next(e)
+  })
+
+  // A compaction restarts the forecast from what it left: the hook only
+  // watches (after `next`) and passes the compaction through unchanged.
   on('session.compact', async ($, e, next) => {
     const ran = await next(e)
     if (e.trigger !== 'precompute' && e.agentId === undefined) await afterCompaction($, ran)

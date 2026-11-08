@@ -1,7 +1,6 @@
 {
   "name": "context-forecast",
-  "displayName": "Context Forecast",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A weather forecast for your context window: conditions above the prompt, a /weather outlook pane, storm warnings before compaction",
   "author": {
     "name": "Feida Wang",

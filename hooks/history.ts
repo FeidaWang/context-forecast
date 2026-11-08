@@ -69,11 +69,6 @@ export function parseTranscript(text: string): WeatherSample[] {
   return out.slice(-400)
 }
 
-// Where Claude Code keeps a session's transcript.
-export function transcriptPath(configDir: string, cwd: string, sessionId: string): string {
-  return `${configDir}/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`
-}
-
 // The cache lifetime the latest main-thread write used, read off the
 // transcript's `usage.cache_creation` split (1h vs 5m writes), with when that
 // response came back. Null when no response wrote to the cache.

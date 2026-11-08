@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- Directory review fixes: the transcript path now comes from Claude Code's own hook input (`transcript_path`), so no environment variable is read; no `h` names in JSX files; `displayName` dropped from plugin.json.
+- README and PRIVACY.md say which slash command the mod runs (`/compact`, only on Compact now), what it writes to the clipboard, what View opens, and what its `session.compact` and classic hooks do.
+
 ## 0.2.3
 
 - README rewritten for newcomers, with a Simplified Chinese README (README.zh-CN.md); PRIVACY.md notes the desktop `/compact` path.

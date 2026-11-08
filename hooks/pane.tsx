@@ -68,8 +68,8 @@ export function cacheLeft(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-const stretchOpen = (h: number) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${STRETCH}" height="${h}" viewBox="0 0 ${VB} ${h}" preserveAspectRatio="none">`
+const stretchOpen = (height: number) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${STRETCH}" height="${height}" viewBox="0 0 ${VB} ${height}" preserveAspectRatio="none">`
 
 // A half-pixel rule across the column (1 device pixel on a 2x screen).
 export function hairlineSvg(): string {
@@ -80,18 +80,18 @@ export function hairlineSvg(): string {
 // The context bar: one flat segment per group over the window, a thin gap
 // between segments, the compaction reserve gray at the end.
 export function contextBarSvg(p: Panel): string {
-  const h = 8
-  const parts = [stretchOpen(h), `<rect width="${VB}" height="${h}" fill="${HAIRLINE}" fill-opacity=".16"/>`]
+  const barH = 8
+  const parts = [stretchOpen(barH), `<rect width="${VB}" height="${barH}" fill="${HAIRLINE}" fill-opacity=".16"/>`]
   const scale = VB / Math.max(1, p.barMax)
   let x = 0
   for (const g of p.groups) {
     const gw = g.tokens * scale
-    if (gw >= 0.5) parts.push(`<rect x="${x.toFixed(2)}" width="${Math.max(0.5, gw - 2).toFixed(2)}" height="${h}" fill="${g.color}"/>`)
+    if (gw >= 0.5) parts.push(`<rect x="${x.toFixed(2)}" width="${Math.max(0.5, gw - 2).toFixed(2)}" height="${barH}" fill="${g.color}"/>`)
     x += gw
   }
   if (p.reserve > 0) {
     const rw = p.reserve * scale
-    parts.push(`<rect x="${(VB - rw).toFixed(2)}" width="${rw.toFixed(2)}" height="${h}" fill="${RESERVE_COLOR}" fill-opacity=".55"/>`)
+    parts.push(`<rect x="${(VB - rw).toFixed(2)}" width="${rw.toFixed(2)}" height="${barH}" fill="${RESERVE_COLOR}" fill-opacity=".55"/>`)
   }
   parts.push('</svg>')
   return parts.join('')

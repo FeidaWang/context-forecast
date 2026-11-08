@@ -93,12 +93,15 @@
 一切都在你自己的电脑上运行。Context Forecast **不向任何地方发送任何数据**：不联网，不附带 MCP 服务器，不调用模型。
 
 - **读取会话用量**：Claude Code 报告的当前会话上下文大小、窗口大小、额度百分比和会话费用（`$.session.usage`）。
-- **读取两个环境变量 `HOME` 和 `CLAUDE_CONFIG_DIR`**，只用来找到当前会话的记录文件（`<配置目录>/projects/<项目>/<会话 id>.jsonl`）。不读取任何凭据或密钥，这些值不会被保存或发送。
+- **不读取任何环境变量或凭据。** 记录文件的位置来自 Claude Code 自己交给 hooks 的 `transcript_path`；插件的 `classic.SessionStart`、`classic.UserPromptSubmit` 和 `classic.Stop` 三个 hook 只记下这个路径，事件原样放行。
 - **读取当前会话的记录文件**（`$.fs.read`）：在会话开始时和每轮结束后读取，用于 token 历史和缓存时长（超过 4 MiB 的文件会跳过）。只用到 token 数、缓存数据、请求 id 和时间戳。还会读取会话 `subagents/` 文件夹里的子代理记录，获取子代理类型和 token 数。
 - **读取对话**（`$.session.messages()`）：每轮结束后读取，用来统计工具调用、改过的文件、搜索、大段结果和测试失败的次数，并判断是否换了话题。只保留次数和大小；消息原文和文件路径从不保存或显示。
-- **只在你按下 Compact now 时压缩**（`$.session.compact`；在桌面应用里这个接口不可用，就像你亲手输入一样执行 `/compact`），使用规划页里显示的指令。**Copy** 会把这条 `/compact` 命令写到剪贴板。
+- **只会执行一个斜杠命令 `/compact`，而且只在你按下 Compact now 时。** 它先请 Claude Code 直接压缩（`$.session.compact`）；这个接口不可用时（桌面应用和其他 SDK 环境），就通过 `$.command.run` 执行 `/compact <规划页里显示的指令>`，和你亲手输入完全一样。不执行任何其他命令。
+- **只在你按按钮时写剪贴板**：**Copy**（`/compact` 命令）和 **Disable…**（`/mcp`）。剪贴板内容留在你的电脑上。
+- **按 View 时，在 Claude Code 自带的查看器里打开子代理的记录**（`$.ui.view({ agentId })`）。只是在应用里显示本地记录，不发送任何东西。
+- **用 `session.compact` hook 观察压缩**：每次压缩（你发起的、Claude Code 自动的、或它替你发起的）都原样执行，结束后从新的大小重新开始预报。
 - **不运行任何程序**：不启动进程，不执行 shell 命令。
-- **只处理自己的 `/weather` 命令**，不碰权限、代理、设置或远程控制。
+- **只注册自己的 `/weather` 命令**（如果 `/weather` 被占用则是 `/context-forecast`），不碰权限、代理、设置或远程控制。
 - **保存少量状态**（最近的 token 采样、上次读数、缓存和子代理统计、规划选项、显示模式），存在 Claude Code 自己的插件状态里。
 
 详见 [PRIVACY.md](PRIVACY.md)。

@@ -93,12 +93,15 @@ On the terminal, a few keys work when the band or pane has focus: `f` forecast, 
 Everything runs on your computer. Context Forecast **sends nothing anywhere**: no network requests, no bundled MCP server, no model calls.
 
 - **Reads session usage**: the context size, window, rate-limit percentages and session cost Claude Code reports for the current session (`$.session.usage`).
-- **Reads two environment variables, `HOME` and `CLAUDE_CONFIG_DIR`**, only to find the current session's transcript (`<config dir>/projects/<project>/<session id>.jsonl`). No credential or secret is read; the values are never stored or sent.
+- **Reads no environment variables and no credentials.** The transcript's location is the `transcript_path` Claude Code itself hands to its hooks; the mod's `classic.SessionStart`, `classic.UserPromptSubmit` and `classic.Stop` hooks only note that path and pass each event on unchanged.
 - **Reads the current session's transcript file** (`$.fs.read`) when a session starts and after each turn, for the token history and the prompt-cache lifetime (files over 4 MiB are skipped). Only token counts, cache figures, request ids and timestamps are used. Subagent records in the session's `subagents/` folder are read for agent type and token counts.
 - **Reads the conversation** (`$.session.messages()`) after each turn, to count tool calls, edited files, searches, large results and test failures, and to notice a topic change. Only counts and sizes are kept; message text and file paths are never stored or shown.
-- **Compacts only when you press Compact now** (`$.session.compact`; in the desktop app, where that isn't available, it runs `/compact` just as you would type it), with the instructions shown in the planner. **Copy** writes that `/compact` command to your clipboard.
+- **Runs one slash command, `/compact`, and only when you press Compact now.** It first asks Claude Code to compact directly (`$.session.compact`); where that isn't available (the desktop app and other SDK hosts) it runs `/compact <the instructions shown in the planner>` through `$.command.run`, exactly as if you had typed it. It runs no other command.
+- **Writes to your clipboard only when you press a button**: **Copy** (the `/compact` command) and **Disable…** (`/mcp`). The clipboard stays on your computer.
+- **Opens a subagent's transcript in Claude Code's own viewer** (`$.ui.view({ agentId })`) when you press **View**. That only shows a local record inside the app; nothing is sent anywhere.
+- **Watches compactions** with a `session.compact` hook: it lets every compaction (yours, Claude Code's automatic one, or one it started) run unchanged, then restarts the forecast from the new size.
 - **Runs no programs**: no processes, no shell commands.
-- **Handles only its own `/weather` command.** It doesn't touch permissions, agents, settings or Remote Control.
+- **Registers only its own `/weather` command** (or `/context-forecast` if `/weather` is taken). It doesn't touch permissions, agents, settings or Remote Control.
 - **Keeps a little state** (recent token samples, last reading, cache and subagent counts, planner choices, display mode) in Claude Code's own plugin state.
 
 See [PRIVACY.md](PRIVACY.md).

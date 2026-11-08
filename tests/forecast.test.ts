@@ -20,7 +20,7 @@ import {
   turnsPhrase,
   WARN,
 } from '../hooks/forecast'
-import { parseTranscript, transcriptPath } from '../hooks/history'
+import { parseTranscript } from '../hooks/history'
 import { SKY_COLUMNS, skyBody, skyCells, skySvg } from '../hooks/sky'
 import { LEVELS } from '../hooks/forecast'
 
@@ -164,7 +164,6 @@ test('transcript parsing tolerates junk', async () => {
   expect(parseTranscript('not json\n{broken\n')).toEqual([])
   const zero = JSON.stringify({ type: 'assistant', requestId: 'z', message: { usage: { input_tokens: 0 } } })
   expect(parseTranscript(zero)).toEqual([])
-  expect(transcriptPath('/c', '/Users/me/my proj', 'abc')).toBe('/c/projects/-Users-me-my-proj/abc.jsonl')
 })
 
 test('every sky level draws', async () => {

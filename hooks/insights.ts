@@ -89,6 +89,21 @@ export function mcpServers(tools: readonly McpTool[], callsByTool: Readonly<Reco
   return [...rows.values()].sort((a, b) => b.tokens - a.tokens)
 }
 
+// Servers the app itself provides (the desktop's browser, terminal, session
+// tools): their size is worth knowing, but /mcp cannot turn them off.
+export function isAppServer(name: string): boolean {
+  return /^(Claude_|ccd_)/.test(name) || ['claude-in-chrome', 'computer-use', 'terminal', 'visualize', 'plugin-authoring'].includes(name)
+}
+
+// The model as /model names it: `claude-opus-5-5` → `Opus 5.5`,
+// `claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5`; anything else as given.
+export function modelName(id: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$/.exec(id)
+  if (!m) return id
+  const family = m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1)
+  return `${family} ${m[2]}${m[3] ? `.${m[3]}` : ''}`
+}
+
 // A server worth disabling: big schemas in the window, never called.
 export const MCP_FLAG_TOKENS = 5_000
 export function idleHeavyServer(servers: readonly McpServerRow[]): McpServerRow | null {
@@ -303,8 +318,10 @@ export function fmtK1(n: number): string {
   return `${GROUPED.format(n / 1000)}k`
 }
 
-// Summary figures: whole k from 10k up (168k, 430k), one decimal below (9.3k).
+// Summary figures: whole k from 10k up (168k, 430k), one decimal below (9.3k),
+// M from a million (1M, 1.5M).
 export function fmtKs(n: number): string {
+  if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (Math.abs(n) < 10_000) return fmtK(n)
   return `${WHOLE.format(Math.round(n / 1000))}k`
 }

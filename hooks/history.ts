@@ -114,3 +114,22 @@ export function subagentPeak(text: string): number {
   }
   return peak
 }
+
+// The cache lifetime as its behaviour shows it, for when the transcript cannot
+// be read: after an idle gap past five minutes a request that still reads most
+// of its prompt from the cache had a 1h lifetime; one inside the hour that
+// reads almost nothing had 5m. Null while nothing tells.
+export function inferTtl(
+  lastAt: number | null,
+  at: number,
+  u: { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number },
+): number | null {
+  if (lastAt === null) return null
+  const gap = at - lastAt
+  const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+  if (gap <= 5 * 60_000 || total <= 0) return null
+  const readShare = u.cache_read_input_tokens / total
+  if (readShare >= 0.5) return 3_600_000
+  if (gap < 3_600_000 && readShare < 0.1) return 300_000
+  return null
+}

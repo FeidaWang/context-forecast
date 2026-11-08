@@ -14,6 +14,7 @@ import {
   idleHeavyServer,
   mcpServers,
   nextMoves,
+  modelName,
   plannerChips,
 } from './insights'
 import type { McpServerRow } from '../types'
@@ -153,7 +154,7 @@ export function buildPanel(x: PanelInput): Panel | null {
   return {
     f,
     level: f.level,
-    model: r.model ?? '',
+    model: r.model ? modelName(r.model) : '',
     tokens: f.tokens,
     window: r.window,
     barMax: r.barMax ?? r.window,

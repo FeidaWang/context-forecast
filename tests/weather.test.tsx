@@ -69,17 +69,22 @@ test('band and forecast draw on terminal and desktop', async ($, on) => {
     })
     // 81k of a 160k compaction point: about half way, "Cloudy".
     expect(await band.find({ type: 'Text', text: /Cloudy/ })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: /~6 turns left/ })).toBeDefined()
-    expect(await band.find({ key: 'forecast' })).toBeDefined()
+    // One line: the condition and the turns to auto-compact, pressable.
+    expect(await band.find({ key: 'forecast' })).toMatchObject({ props: { label: '~6 turns until auto-compact ›' } })
+    // The size behind the gauge.
+    expect(await band.find({ type: 'Text', text: '81k / 160k' })).toBeDefined()
     expect(await band.find({ key: 'hide' })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: /5h limit/ })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: /per turn/ })).toBeDefined()
+    // A 41% limit is no news; cost and per-turn figures live in the pane.
+    expect(await band.find({ type: 'Text', text: /5h/ })).toBeUndefined()
+    expect(await band.find({ type: 'Text', text: /\$/ })).toBeUndefined()
+    // Cloudy is calm: no plan button until Rain.
+    expect(await band.find({ key: 'plan' })).toBeUndefined()
     // Minimized, the weather moves into the prompt footer beside the model
     // selector; its percentage brings the band back.
     await band.press({ key: 'mini' })
     expect(await band.find({ key: 'forecast' })).toBeUndefined()
     const footer = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'SessionMode', props: { modes: [] } })
-    expect(await footer.find({ key: 'expand' })).toBeDefined()
+    // Pressing the footer label brings the band back, on every surface.
     await footer.press({ key: 'expand' })
     expect(await footer.find({ key: 'expand' })).toBeUndefined()
     await footer.unmount()
@@ -157,6 +162,8 @@ test('every condition draws its sky on the terminal and desktop', async ($, on) 
   on('session.measure', ($, e) => ({ changed: e.changed }))
   // 160k is the compaction point: clear, cloudy, rain, storm, then a
   // compaction (the clearing).
+  // Shown in full, whatever the weather (auto would fold the calm ones).
+  await $.command.run({ command: 'weather', args: '', origin: { kind: 'composer' } as never, presentation: { isFullscreen: false, columns: 140 } as never })
   const steps: [number, RegExp][] = [
     [40_000, /Clear/], [70_000, /Cloudy/], [110_000, /Rain/], [150_000, /Storm/], [50_000, /Clearing/],
   ]
@@ -237,10 +244,10 @@ test('debug preview: each state draws; the planner builds, copies and compacts',
   for (const surface of SURFACES) {
     const pane = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'Pane', requestId: 'context-forecast', props: PANE_PROPS })
     await pane.select({ key: 'debug-state', value: 'clear' })
-    expect(await pane.find({ type: 'Text', text: 'Plenty of room' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '19% to auto-compact' })).toBeDefined()
     await pane.select({ key: 'debug-state', value: 'cloudy' })
     expect(await pane.find({ type: 'Text', text: '~14 turns left' })).toBeDefined()
-    expect(await pane.find({ type: 'Text', text: /figma · 9\.8k, never called/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /figma · 9\.8k unused/ })).toBeDefined()
     expect(await pane.find({ key: 'mcp-disable' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /Kept ~143k out of your main context/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: '61k → 0.8k' })).toBeDefined()
@@ -252,6 +259,8 @@ test('debug preview: each state draws; the planner builds, copies and compacts',
     expect(await pane.find({ type: 'Text', text: /The topic changed/ })).toBeUndefined()
     await pane.press({ key: 'compact' })
     expect(await pane.find({ type: 'Text', text: 'Compact planner' })).toBeDefined()
+    // The way back leads the planner, worded as where it goes.
+    expect(await pane.find({ key: 'back' })).toMatchObject({ props: { label: '‹ Back to forecast' } })
     // The main card stays in view above (or beside) the planner.
     expect(await pane.find({ type: 'Text', text: 'Storm' })).toBeDefined()
     // Chips are toggles with a check, apart from the primary action.
@@ -332,4 +341,75 @@ test('when another plugin holds /weather, the command answers as /context-foreca
   const presentation = { isFullscreen: false, columns: 140 } as never
   const r = await $.command.run({ command: 'context-forecast', args: 'debug storm', origin: { kind: 'composer' } as never, presentation })
   expect(r.text).toBe('Previewing storm.')
+})
+
+test('auto: calm weather waits in the footer, Rain brings the band back with its action', async ($, on) => {
+  mock.clock(on, { now: 1_700_000_000_000 })
+  let tokens = 20_000
+  on('session.usage', () => ({ value: usageAt(tokens) }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140, scroll: { offset: 0, bodyRows: 10 }, view: {} }
+  for (const t of [20_000, 21_000, 22_000]) {
+    tokens = t
+    await $.session.measure({ context: usageAt(t).context, rateLimits: [], changed: ['context'] })
+  }
+  for (const surface of SURFACES) {
+    // Clear: no band; the footer carries the share of the way to auto-compact.
+    const band = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'AbovePrompt', props })
+    expect(await band.find({ key: 'forecast' })).toBeUndefined()
+    await band.unmount()
+    const footer = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'SessionMode', props: { modes: [] } })
+    expect(await footer.find({ key: 'expand' })).toMatchObject({ props: { label: expect.stringContaining('14%') } })
+    await footer.unmount()
+  }
+  for (const t of [100_000, 108_000]) {
+    tokens = t
+    await $.session.measure({ context: usageAt(t).context, rateLimits: [], changed: ['context'] })
+  }
+  for (const surface of SURFACES) {
+    // Rain (108k of 160k): the band is back and offers the planner.
+    const band = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'AbovePrompt', props })
+    expect(await band.find({ type: 'Text', text: 'Rain' })).toBeDefined()
+    expect(await band.find({ key: 'plan' })).toBeDefined()
+    await band.unmount()
+    const footer = await $.ui.mount({ plugin: 'context-forecast', surface, component: 'SessionMode', props: { modes: [] } })
+    expect(await footer.find({ key: 'expand' })).toBeUndefined()
+    await footer.unmount()
+  }
+})
+
+test('headless (desktop app, SDK): Compact now runs /compact with the planned instructions', async ($, on) => {
+  mock.clock(on, { now: 1_700_000_000_000 })
+  on('session.usage', () => ({ value: usageAt(120_000) }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.focus', () => ({ value: {} }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', text: 'Fix the auth refresh bug', toolUses: [] },
+      { role: 'assistant', text: '', toolUses: [{ tool: 'Edit', input: { file_path: '/a.ts' }, text: 'ok' }] },
+    ],
+  }))
+  on('turn.complete', () => ({ text: 'done' }))
+  // The engine's answer in a headless session: no direct compaction.
+  on('session.compact', () => {
+    throw new Error('$.session.compact: not available in a headless (-p / SDK) session yet')
+  })
+  let ran: { command: string; args: string } | undefined
+  on('command.run', { command: 'compact' }, ($, e) => ((ran = { command: e.command, args: e.args }), { text: '' }))
+  await $.session.measure({ context: usageAt(120_000).context, rateLimits: [], changed: ['context'] })
+  await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+
+  const pane = await $.ui.mount({ plugin: 'context-forecast', surface: 'desktop', component: 'Pane', requestId: 'context-forecast', props: PANE_PROPS })
+  await pane.press({ key: 'compact' })
+  await pane.press({ key: 'compact-now' })
+  await pane.press({ key: 'compact-now' })
+  expect(ran).toEqual({ command: 'compact', args: 'Keep the current task, plan, the 1 edited file path and the decisions made.' })
+  // Back on the forecast once /compact is queued.
+  expect(await pane.find({ type: 'Text', text: 'Compact planner' })).toBeUndefined()
+  await pane.unmount()
 })

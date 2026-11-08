@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- Band redesign: one line (condition · turns until auto-compact, pressable), gauge with a neutral threshold mark until Rain, limits only past 50% in a fixed order, Plan compact in Rain and Storm, "Compacted · before → after" after a compaction; cost moved to the pane; Cloudy is now calm blue.
+- Band refinements: the condition keeps its colour, the line reads "~N turns until auto-compact ›" (or "46% to auto-compact" with room to spare), the size sits beside a gauge with no unlabelled projection, Minimize/Hide at full strength; new default `auto` folds the band into the footer while calm.
+- Footer weather is a plain, dim button (no extra padding or offset) that opens the band.
+- Live-data fixes: cache lifetime inferred when the transcript is too large to read; subagent records read on their own; model shown as "Opus 5.5" and 1M windows as "1M"; the hero matches the band ("55% to auto-compact"); "533k used" under the bar; app-provided MCP servers have no Disable button; resets past a day read "1d 0h".
+- Pane sections carry tinted Lucide icons (shared with the Codex edition); each context category shows a share bar; cache hit rate is coloured; subagent values no longer wrap; the planner's way back is "‹ Back to forecast" at its top-left.
+- Compact now works in the desktop app: where direct compaction is not available (headless/SDK hosts) it runs `/compact` with the planned instructions.
+- Subagent rows: the type is plain text aligned with the other labels; each row has a View button at the right that opens its transcript.
+- Section icons: Prompt cache is a database, Subagents a bot.
+- The model name in the pane header is in Claude orange; the Usage icon and bars are orange too, turning red from 90%.
+
 ## 0.2.0
 
 - Four conditions by share of the auto-compact threshold: Clear (<30%), Cloudy (30–60%), Rain (60–85%), Storm (85%+); Clearing after a compaction.

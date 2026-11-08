@@ -39,8 +39,10 @@ export type WeatherReading = {
   claudeMdTokens?: number
 }
 
-// How the band above the prompt shows: both rows, one compact row, or not at all.
-export type BandMode = 'full' | 'compact' | 'hidden'
+// How the band above the prompt shows: `auto` (the default) folds it into the
+// prompt footer while there is nothing to act on and opens it when there is;
+// `full`, `compact` (the footer) and `hidden` are the person's own choice.
+export type BandMode = 'auto' | 'full' | 'compact' | 'hidden'
 
 export type WeatherTurn = { input: number; output: number; cacheRead: number; cacheWrite: number }
 

@@ -6,9 +6,11 @@ import type { EngineInterface, RenderElement } from 'claude-code'
 
 import type { DebugState, PaneView } from '../types'
 import { BAD, GOOD, isAlertRank } from './forecast'
-import { RESERVE_COLOR, fmtK, fmtK1, fmtKs } from './insights'
+import { RESERVE_COLOR, fmtK, fmtK1, fmtKs, isAppServer } from './insights'
 import type { Panel } from './panel'
 import { skySvg } from './sky'
+import { iconSvg } from './icons'
+import type { IconName } from './icons'
 
 type Api = EngineInterface
 type Els = ReturnType<Api['ui']['resolve']>
@@ -21,6 +23,8 @@ type InputEl = ReturnType<Api['ui']['resolve']> extends infer T ? (T extends { I
 export const MAX_CELLS = 41
 const CARD_GAP = 4
 const HAIRLINE = '#8a8f98'
+// Claude's own orange: the model's name and the plan limits.
+const CLAUDE = '#d97757'
 // Graphics are drawn this wide and capped to their slot: with no `width` on
 // the Svg, the surface sizes the box to the slot and `preserveAspectRatio`
 // "none" stretches the drawing across it, so bars match the text column.
@@ -72,6 +76,7 @@ export function hairlineSvg(): string {
   return `${stretchOpen(1)}<rect width="${VB}" height=".5" fill="${HAIRLINE}" fill-opacity=".7"/></svg>`
 }
 
+
 // The context bar: one flat segment per group over the window, a thin gap
 // between segments, the compaction reserve gray at the end.
 export function contextBarSvg(p: Panel): string {
@@ -97,8 +102,16 @@ export function meterSvg(fraction: number, color: string): string {
   return `${stretchOpen(4)}<rect width="${VB}" height="4" fill="${HAIRLINE}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="4" fill="${color}"/></svg>`
 }
 
+// A short share bar: a fixed 44px, small enough to sit beside a value.
+export function shareSvg(fraction: number, color: string): string {
+  const w = 44
+  const fw = Math.max(fraction > 0 ? 2 : 0, Math.min(1, fraction) * w)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="6" viewBox="0 0 ${w} 6"><rect width="${w}" height="6" rx="3" fill="${HAIRLINE}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="6" rx="3" fill="${color}"/></svg>`
+}
+
+// The usage bars wear Claude's orange until a limit nears its end.
 function limitColor(percent: number): string {
-  return percent >= 90 ? BAD : percent >= 75 ? '#ec835a' : percent >= 50 ? '#d39a12' : '#b4b2a9'
+  return percent >= 90 ? BAD : CLAUDE
 }
 
 // One number token: no spaces inside, so mono never widens a gap.
@@ -141,20 +154,26 @@ function kit(x: PaneContext, cells: number) {
       </Text>
     )
   }
+  // A label left, its value right; the value never wraps or shrinks.
   const row = (key: string, left: RenderElement | string, right: RenderElement | string | null) => (
-    <Box key={key} flexDirection="row" columnGap={1} alignItems="center">
-      <Box flexShrink={1}>{typeof left === 'string' ? prose(`${key}-l`, left) : left}</Box>
-      <Box flexGrow={1} />
-      {right === null ? null : typeof right === 'string' ? num(`${key}-v`, right) : right}
+    <Box key={key} flexDirection="row" columnGap={1} alignItems="flex-start">
+      <Box flexShrink={1} flexGrow={1}>{typeof left === 'string' ? prose(`${key}-l`, left) : left}</Box>
+      {right === null ? null : <Box flexShrink={0}>{typeof right === 'string' ? num(`${key}-v`, right) : right}</Box>}
     </Box>
   )
-  const title = (key: string, text: string, right?: RenderElement | null) => (
+  // A section's heading: its icon in the section's tint (desktop), the title,
+  // and anything it reports at the right.
+  const title = (key: string, text: string, right?: RenderElement | null, icon?: IconName) => (
     <Box key={key} flexDirection="row" columnGap={1} alignItems="center">
+      {icon && Svg ? <Svg key={`${key}-icon`} source={iconSvg(icon)} alt={`${text} icon`} width={14} height={14} /> : null}
       <Text weight="semibold">{text}</Text>
       <Box flexGrow={1} />
       {right ?? null}
     </Box>
   )
+  // A category's share of what is in context, as a short bar in its colour.
+  const share = (key: string, fraction: number, color: string) =>
+    Svg ? <Svg key={key} source={shareSvg(fraction, color)} alt={`${Math.round(fraction * 100)}%`} width={44} height={6} /> : null
   // Sections with a hairline between each.
   const stack = (key: string, sections: (RenderElement | null)[], width: number) => {
     const shown = sections.filter((s): s is RenderElement => s !== null)
@@ -164,7 +183,7 @@ function kit(x: PaneContext, cells: number) {
       </Box>
     )
   }
-  return { Svg, num, prose, rule, meter, row, title, stack }
+  return { Svg, num, prose, rule, meter, row, title, share, stack }
 }
 
 const DEBUG_STATES = ['live', 'clear', 'cloudy', 'storm', 'planner'] as const
@@ -217,10 +236,14 @@ export function drawPane(p: Panel | null, x: PaneContext): RenderElement {
   const showPlanner = x.view === 'planner' && p.planner !== null
   const isFolded = showPlanner && !isWide
   const cards: RenderElement[] = [mainCard(p, x, cells, { withFooter: !showPlanner, isFolded })]
-  if (showPlanner) cards.push(plannerCard(p, x, cells))
+  if (isFolded) cards.push(k.rule('cards-rule'))
+  if (showPlanner) cards.push(plannerCard(p, x, cells, { withBack: isWide }))
+  // Stacked, the way back leads the whole pane, where the eye starts.
+  const back = isFolded ? backButton(x) : null
   return (
     <Box flexDirection="column" gap={1}>
       {debugStrip}
+      {back}
       <Box flexDirection={isWide ? 'row' : 'column'} columnGap={CARD_GAP} rowGap={1} alignItems="flex-start">
         {cards}
       </Box>
@@ -241,9 +264,10 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
         {lv.name}
       </Text>
       <Box flexGrow={1} />
-      <Text dimColor>
-        {p.model ? `${p.model} · ` : ''}
-        <Text mono tabular>
+      <Text wrap="truncate">
+        {p.model ? <Text color={CLAUDE} weight="semibold">{p.model}</Text> : ''}
+        {p.model ? <Text dimColor> · </Text> : ''}
+        <Text dimColor mono tabular>
           {fmtKs(p.tokens)} / {fmtKs(p.window)}
         </Text>
       </Text>
@@ -290,29 +314,36 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
       </Box>
       <Box flexDirection="column" gap={0}>
         {bar}
-        {k.row('captions', k.prose('used', `${p.usedPercent}% used`, { dim: true }), p.reserve > 0 ? <Text dimColor>reserved for compact</Text> : null)}
+        {k.row('captions', k.prose('used', `${fmtKs(p.tokens)} used`, { dim: true }), p.reserve > 0 ? <Text dimColor>reserved for compact</Text> : null)}
       </Box>
     </Box>
   )
   if (o.isFolded) return k.stack('main', [top], cells)
 
+  const used = p.groups.reduce((a, g) => a + g.tokens, 0)
   const context = (
     <Box key="context" flexDirection="column">
-      {k.title('ctx-title', "What's in context")}
+      {k.title('ctx-title', "What's in context", null, 'layers')}
       {p.groups.map(g =>
         k.row(
           `g-${g.key}`,
           <Text>
             <Text color={g.color}>■</Text> {g.label}
           </Text>,
-          fmtK(g.tokens),
+          <Box key={`g-${g.key}-r`} flexDirection="row" columnGap={1} alignItems="center">
+            {k.share(`g-${g.key}-share`, g.tokens / Math.max(1, used), g.color)}
+            <Box width={7} alignItems="flex-end">
+              {k.num(`g-${g.key}-v`, fmtK(g.tokens))}
+            </Box>
+          </Box>,
         ),
       )}
       {p.mcpFlag &&
         k.row(
           'mcp-flag',
-          k.prose('mcp-flag-l', `${p.mcpFlag.name} · ${fmtK(p.mcpFlag.tokens)}, never called`, { dim: true }),
-          <Button key="mcp-disable" label="Disable…" plain onPress={() => x.actions.copyMcp(p.mcpFlag!.name)} />,
+          k.prose('mcp-flag-l', `${p.mcpFlag.name} · ${fmtK(p.mcpFlag.tokens)} unused`, { dim: true }),
+          // An app's own server cannot be turned off in /mcp: no button for it.
+          isAppServer(p.mcpFlag.name) ? null : <Button key="mcp-disable" label="Disable…" plain onPress={() => x.actions.copyMcp(p.mcpFlag!.name)} />,
         )}
     </Box>
   )
@@ -330,9 +361,9 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
           : k.num('cache-state', `cold · ${ttl} TTL`, { color: BAD })
     cache = (
       <Box key="cache" flexDirection="column" gap={0}>
-        {k.title('cache-title', 'Prompt cache', state)}
+        {k.title('cache-title', 'Prompt cache', state, 'database')}
         {c.ttlMs !== null && k.meter('cache-meter', (c.remainingMs ?? 0) / c.ttlMs, c.isWarm ? GOOD : BAD)}
-        {k.row('cache-read', 'Read from cache', c.readPercent !== null ? `${c.readPercent.toFixed(1)}%` : '—')}
+        {k.row('cache-read', 'Read from cache', c.readPercent !== null ? k.num('cache-read-v', `${c.readPercent.toFixed(1)}%`, { color: c.readPercent >= 90 ? GOOD : c.readPercent < 50 ? BAD : undefined }) : '—')}
         {c.wrote !== null && k.row('cache-wrote', 'Written last turn', fmtK(c.wrote))}
         {k.row('cache-cold', c.isWarm === false ? 'Next turn re-writes' : 'Re-written if it goes cold', `~${fmtKs(c.rewrite)} tokens`)}
       </Box>
@@ -343,14 +374,27 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
   if (p.agents) {
     agents = (
       <Box key="agents" flexDirection="column">
-        {k.title('agents-title', `Subagents · ${p.agents.rows.length}`, <Text dimColor>context → returned</Text>)}
-        {p.agents.rows.map(a =>
-          k.row(
-            `agent-${a.id}`,
-            <Button key={`agent-open-${a.id}`} label={`${a.type}${a.isRunning ? ' · running' : a.description ? ` · ${a.description}` : ''}`} plain onPress={() => x.actions.viewAgent(a.id)} />,
-            k.num(`agent-${a.id}-v`, a.isRunning || a.returned === null ? fmtKs(a.input) : `${fmtKs(a.input)} → ${fmtK1(a.returned)}`, { color: a.isRunning ? GOOD : undefined }),
-          ),
-        )}
+        {k.title('agents-title', `Subagents · ${p.agents.rows.length}`, <Text dimColor>context → returned</Text>, 'bot')}
+        {p.agents.rows.map(a => (
+          // The type and the figures share a line; the description, which runs
+          // long, gets the line under it to itself. The type stays plain text,
+          // aligned with every other label; the transcript opens from a button
+          // at the right, where the pane's other actions sit.
+          <Box key={`agent-${a.id}`} flexDirection="column" gap={0}>
+            {k.row(
+              `agent-${a.id}-top`,
+              <Text>
+                {a.type}
+                {a.isRunning ? <Text color={GOOD}> · running</Text> : ''}
+              </Text>,
+              <Box key={`agent-${a.id}-r`} flexDirection="row" columnGap={1} alignItems="center">
+                {k.num(`agent-${a.id}-v`, a.isRunning || a.returned === null ? fmtKs(a.input) : `${fmtKs(a.input)} → ${fmtK1(a.returned)}`, { color: a.isRunning ? GOOD : undefined })}
+                <Button key={`agent-open-${a.id}`} label="View" plain onPress={() => x.actions.viewAgent(a.id)} />
+              </Box>,
+            )}
+            {a.description ? k.prose(`agent-${a.id}-d`, a.description, { dim: true }) : null}
+          </Box>
+        ))}
         {p.agents.kept > 0 && k.prose('kept', `Kept ~${fmtKs(p.agents.kept)} out of your main context`, { dim: true })}
       </Box>
     )
@@ -359,6 +403,7 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
   const limits =
     p.limits.length > 0 || p.usd !== null ? (
       <Box key="limits" flexDirection="column" gap={1}>
+        {k.title('limits-title', 'Usage', null, 'chart')}
         {p.limits.map(l => (
           <Box key={`limit-${l.kind}`} flexDirection="column" gap={0}>
             {k.row(`limit-${l.kind}-row`, l.label, `${Math.round(l.percent)}%${l.reset ? ` · ${l.reset}` : ''}`)}
@@ -401,7 +446,12 @@ export function chipMark(side: 'keep' | 'drop', on: boolean): string {
   return on ? (side === 'keep' ? '☑' : '☒') : '☐'
 }
 
-function plannerCard(p: Panel, x: PaneContext, cells: number): RenderElement {
+function backButton(x: PaneContext): RenderElement {
+  const { Button } = x.els
+  return <Button key="back" label="‹ Back to forecast" plain hotkey={x.surface === 'terminal' ? 'b' : undefined} onPress={x.actions.closePlanner} />
+}
+
+function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boolean }): RenderElement {
   const { Box, Text, Button } = x.els
   const k = kit(x, cells)
   const pl = p.planner!
@@ -430,11 +480,9 @@ function plannerCard(p: Panel, x: PaneContext, cells: number): RenderElement {
       : 'Compact now'
   const plan = (
     <Box key="plan" flexDirection="column" gap={1}>
-      <Box flexDirection="row" columnGap={1} alignItems="center">
-        <Text weight="semibold">Compact planner</Text>
-        <Box flexGrow={1} />
-        <Button key="back" label="Close" plain dimColor hotkey={x.surface === 'terminal' ? 'b' : undefined} role="dismiss" onPress={x.actions.closePlanner} />
-      </Box>
+      {/* Beside the main card, the way back leads this card. */}
+      {o.withBack ? backButton(x) : null}
+      {k.title('planner-title', 'Compact planner', null, 'minimize')}
       {chips('keep', 'Keep')}
       {chips('drop', 'Drop')}
       <Box key="preview" flexDirection="column" paddingX={1} borderStyle="round" borderDimColor>
@@ -466,7 +514,7 @@ function plannerCard(p: Panel, x: PaneContext, cells: number): RenderElement {
   const moves =
     p.moves.length > 0 ? (
       <Box key="moves" flexDirection="column" gap={1}>
-        {k.title('moves-title', 'Next move')}
+        {k.title('moves-title', 'Next move', null, 'info')}
         {p.moves.map(m => (
           <Box key={`move-${m.id}`} flexDirection="row" columnGap={1} alignItems="flex-start">
             <Text color="suggestion">→</Text>

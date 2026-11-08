@@ -11,6 +11,7 @@ import {
   forecast,
   gaugeCells,
   gaugeSvg,
+  BAD,
   isAlertRank,
   limitName,
   markCompaction,
@@ -20,11 +21,13 @@ import {
 import type { Forecast, Level } from './forecast'
 import { SKY_COLUMNS, skyCells, skySvg } from './sky'
 import { lastCacheTtl, parseTranscript, subagentPeak, transcriptPath } from './history'
+import { inferTtl } from './history'
 import { groupCategories, compactCommand, scanSession, serverOfTool, tokensOf } from './insights'
 import { buildPanel } from './panel'
 import type { PanelInput } from './panel'
 import { fixture } from './fixtures'
 import { PLANNER_FOCUS, cacheLeft, drawPane } from './pane'
+import { buildBand } from './band'
 
 const PANE = 'context-forecast'
 const TITLE = 'Context Forecast'
@@ -32,7 +35,7 @@ const TITLE = 'Context Forecast'
 const samples = atom({ plugin: 'context-forecast', key: 'samples' } as const, [])
 const reading = atom({ plugin: 'context-forecast', key: 'reading' } as const, null)
 const lastTurn = atom({ plugin: 'context-forecast', key: 'lastTurn' } as const, null)
-const bandMode = atom({ plugin: 'context-forecast', key: 'bandMode' } as const, 'full' as BandMode)
+const bandMode = atom({ plugin: 'context-forecast', key: 'bandMode' } as const, 'auto' as BandMode)
 const lastLevel = atom({ plugin: 'context-forecast', key: 'lastLevel' } as const, -1)
 const cacheAtom = atom({ plugin: 'context-forecast', key: 'cache' } as const, null)
 const agentsAtom = atom({ plugin: 'context-forecast', key: 'agents' } as const, [] as AgentRun[])
@@ -43,6 +46,8 @@ const debugOnAtom = atom({ plugin: 'context-forecast', key: 'isDebugOn' } as con
 const debugAtom = atom({ plugin: 'context-forecast', key: 'debug' } as const, null as DebugState)
 const confirmAtom = atom({ plugin: 'context-forecast', key: 'isConfirming' } as const, false)
 const extraAtom = atom({ plugin: 'context-forecast', key: 'extraInstruction' } as const, '')
+// The name `/weather` registered under (another plugin may hold `weather`).
+let commandName = 'weather'
 const runningAtom = atom({ plugin: 'context-forecast', key: 'isTurnRunning' } as const, false)
 const mcpCallsAtom = atom({ plugin: 'context-forecast', key: 'mcpCalls' } as const, {} as Record<string, number>)
 
@@ -93,13 +98,15 @@ async function backfill($: Api): Promise<void> {
   try {
     const path = await findTranscript($)
     if (!path) return
+    // Subagent records are small files of their own: read them whatever
+    // becomes of the transcript.
+    await backfillAgents($, path.replace(/\.jsonl$/, '/subagents')).catch(() => undefined)
     // A transcript over the 4 MiB read bound throws; the forecast then builds
     // from live readings instead of the past.
     const text = await $.fs.read(path)
     const history = parseTranscript(text)
     if (history.length > 0) await update($, samples, () => history)
     await readTtl($, text)
-    await backfillAgents($, path.replace(/\.jsonl$/, '/subagents'))
   } catch {
     // No history to be had: the forecast builds from live readings instead.
   }
@@ -220,7 +227,14 @@ async function afterMeasure($: Api): Promise<void> {
 
 async function setBandMode($: Api, mode: BandMode): Promise<void> {
   await update($, bandMode, () => mode)
-  if (mode === 'hidden') $.ui.toast('Context Forecast hidden · /weather brings it back')
+  if (mode === 'hidden') $.ui.toast(`Context Forecast hidden · /${commandName} brings it back`, { timeoutMs: 8000 })
+  if (mode === 'compact') $.ui.toast(`Weather moved to the footer · /${commandName} brings the band back`, { timeoutMs: 6000 })
+}
+
+// Opens the forecast pane on its planner, from the band's button.
+async function planFromBand($: Api): Promise<void> {
+  if (!(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: TITLE })
+  await openPlanner($)
 }
 
 // A compaction that stood: the forecast restarts from what it left, and the
@@ -293,8 +307,20 @@ async function compactNow($: Api): Promise<void> {
       await update($, extraAtom, () => '')
       await update($, viewAtom, () => 'main')
     }
-  } catch (err) {
-    $.ui.toast(`Could not compact: ${(err as Error).message}`)
+  } catch {
+    // Where the session runs headless (the desktop app, an SDK host) the call
+    // is not there yet: compaction runs as a turn of its own. Run `/compact`
+    // as the person would; its session.compact reaches our hook as any
+    // compaction does, and the forecast restarts there.
+    try {
+      await $.command.run({ command: 'compact', args: instructions })
+      $.ui.toast('Compacting with your plan…', { timeoutMs: 4000 })
+      await update($, extraAtom, () => '')
+      await update($, viewAtom, () => 'main')
+    } catch (err) {
+      await copyCommand($, 'desktop')
+      $.ui.toast(`Could not start /compact here (${(err as Error).message}). The command is on your clipboard: paste it and send.`, { timeoutMs: 10000 })
+    }
   }
 }
 
@@ -306,60 +332,6 @@ async function togglePane($: Api): Promise<string> {
   }
   await $.ui.open({ id: PANE, title: TITLE })
   return 'Forecast opened.'
-}
-
-// ---- figures both surfaces show -----------------------------------------------
-
-type Facts = {
-  f: Forecast
-  r: WeatherReading
-  turn: WeatherTurn | null
-  now: number
-  cacheHit: number | null
-  perHour: number | null
-  elapsed: number
-}
-
-async function facts($: Api): Promise<Facts | null> {
-  const r = await read($, reading)
-  const f = forecast(await read($, samples), r)
-  if (!f || !r) return null
-  const turn = await read($, lastTurn)
-  const cacheTotal = turn ? turn.input + turn.cacheRead + turn.cacheWrite : 0
-  // Cost per hour is taken at the moment of the reading, so the band and the
-  // pane always agree.
-  const elapsed = Math.max(0, r.measuredAt - r.startedAt)
-  return {
-    f,
-    r,
-    turn,
-    now: await $.clock.now(),
-    cacheHit: turn && cacheTotal > 0 ? Math.round((turn.cacheRead / cacheTotal) * 100) : null,
-    perHour: r.usd !== null && elapsed > 5 * 60000 && elapsed < 7 * 86400000 ? r.usd / (elapsed / 3600000) : null,
-    elapsed,
-  }
-}
-
-function turnsLeftShort(f: Forecast): string | null {
-  if (f.isPlenty) return 'plenty of room'
-  if (f.turnsLeft === null) return null
-  return f.turnsLeft === 0 ? 'compacting' : `~${f.turnsLeft} turn${f.turnsLeft === 1 ? '' : 's'} left`
-}
-
-// Cells a string takes: emoji and wide characters count two.
-function cellWidth(text: string): number {
-  let n = 0
-  for (const ch of text) {
-    const c = ch.codePointAt(0)!
-    if (c === 0xfe0f || c === 0x200d) continue
-    n += c >= 0x1f000 || (c >= 0x2600 && c <= 0x27bf) || (c >= 0x2e80 && c <= 0xffdc) ? 2 : 1
-  }
-  return n
-}
-
-function resetIn(resetsAt: string | undefined, now: number): string | null {
-  const ms = resetsAt ? Date.parse(resetsAt) - now : NaN
-  return Number.isFinite(ms) ? fmtIn(ms) : null
 }
 
 // The command, under whichever name it registered.
@@ -389,6 +361,10 @@ async function weatherCommand($: Api, args: string): Promise<{ text: string }> {
     await setBandMode($, 'hidden')
     return { text: 'Context Forecast hidden.' }
   }
+  if (arg === 'auto') {
+    await setBandMode($, 'auto')
+    return { text: 'Context Forecast band: auto (in the footer while there is room, above the prompt when it matters).' }
+  }
   if (arg === 'mini') {
     await setBandMode($, 'compact')
     return { text: 'Context Forecast minimized to the footer.' }
@@ -409,9 +385,10 @@ export function register(on: Parameters<Register>[0]): void {
         await $.command.register({
           name,
           description: 'Context Forecast: show the band; `forecast` opens the forecast, `mini` minimizes, `hide` hides, `debug` previews',
-          argumentHint: '[forecast|mini|hide|debug]',
+          argumentHint: '[forecast|auto|mini|hide|debug]',
           immediate: true,
         })
+        commandName = name
         break
       } catch {
         // Taken: try the next name.
@@ -439,9 +416,11 @@ export function register(on: Parameters<Register>[0]): void {
     const at = await $.clock.now()
     if (e.agentId === undefined) {
       await update($, samples, list => addRequest(list, tokens, u.output_tokens, at))
+      // Where the transcript cannot say (over the read bound), the cache's own
+      // behaviour across an idle gap tells its lifetime (inferTtl).
       await update($, cacheAtom, c => ({
         lastRequestAt: at,
-        ttlMs: c?.ttlMs ?? null,
+        ttlMs: c?.ttlMs ?? inferTtl(c?.lastRequestAt ?? null, at, u),
         read: u.cache_read_input_tokens,
         write: u.cache_creation_input_tokens,
         input: u.input_tokens,
@@ -516,154 +495,111 @@ export function register(on: Parameters<Register>[0]): void {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const mode = await read($, bandMode)
-    if (e.props.hasSurvey || e.props.view.agentId !== undefined || mode !== 'full') {
+    if (e.props.hasSurvey || e.props.view.agentId !== undefined || (mode !== 'full' && mode !== 'auto')) {
       return next(e)
     }
-    const x = await facts($)
+    const r = await read($, reading)
+    const list = await read($, samples)
+    const f = forecast(list, r)
+    // Auto: nothing to act on, so the weather waits in the footer.
+    if (mode === 'auto' && f && r && buildBand(f, r, list, await $.clock.now()).isCalm) return next(e)
     const isTerminal = e.surface === 'terminal'
-    const openPane = () => void togglePane($)
-    const setMode = (m: BandMode) => () => void setBandMode($, m)
     const cols = e.props.bodyColumns
-
     const { Box, Text, Button } = $.ui.resolve(e)
-    const hideButton = (
-      <Button key="hide" label="×" role="dismiss" plain onPress={setMode('hidden')} />
-    )
-    // Minimal controls drawn like the footer's model selector (bare text, a
-    // frame only under the pointer): Forecast, a minus that tucks the weather
-    // into the footer, a cross that hides it.
     const controls = (
-      <Box flexDirection="row" columnGap={1} alignItems="center">
-        <Button key="forecast" label="Forecast" plain hotkey={isTerminal ? 'f' : undefined} onPress={openPane} />
-        <Button key="mini" label="−" plain hotkey={isTerminal ? 'm' : undefined} onPress={setMode('compact')} />
-        {hideButton}
+      <Box flexDirection="row" columnGap={2} alignItems="center">
+        <Button key="mini" label="Minimize" plain hotkey={isTerminal ? 'm' : undefined} onPress={() => void setBandMode($, 'compact')} />
+        <Button key="hide" label="Hide" plain role="dismiss" onPress={() => void setBandMode($, 'hidden')} />
       </Box>
     )
-
-    if (!x) {
+    if (!f || !r) {
       return (
-        <Box flexDirection="row" gap={2} alignItems="center">
-          <Text>☀️ Context Forecast · the forecast starts with Claude's first reply</Text>
-          <Box flexGrow={1} />
-          {hideButton}
-        </Box>
-      )
-    }
-    const { f, r, now } = x
-    const isAlert = isAlertRank(f.level.rank)
-    const left = turnsLeftShort(f)
-
-    const gauge = (cells: number) => {
-      if (e.surface === 'terminal') {
-        const { Raster } = $.ui.resolve(e)
-        return <Raster key="gauge" {...gaugeCells(f, cells)} />
-      }
-      const { Svg } = $.ui.resolve(e)
-      return (
-        <Svg
-          source={gaugeSvg(f, cells * PX_PER_CELL)}
-          alt={`${Math.round(f.fraction * 100)}% of the way to auto-compact`}
-          width={cells * PX_PER_CELL}
-          height={20}
-        />
-      )
-    }
-
-    const skyIcon = (size: number) => {
-      if (e.surface === 'terminal') {
-        const { Raster } = $.ui.resolve(e)
-        sky.site = e.requestId
-        sky.level = f.level
-        return <Raster key="sky" columns={SKY_COLUMNS} rows={1} cells={skyCells(f.level, sky.frame)} />
-      }
-      const { Svg } = $.ui.resolve(e)
-      return <Svg key="sky" source={skySvg(f.level, size)} alt={f.level.name} width={size} height={size} />
-    }
-
-    // ---- one line: compact mode, or a band too narrow for the blocks
-    if (cols < 60) {
-      const head = `${f.windowPercent}% ${f.level.name}`
-      const tail = left ? (isAlert ? `⚠ ${left}` : left) : ''
-      // The gauge takes whatever the line leaves, so the row spans the band.
-      const fixed = SKY_COLUMNS + cellWidth(head) + cellWidth(tail) + (isTerminal ? 16 : 18) + 4 * 3
-      const gaugeCells = Math.max(8, Math.min(90, cols - fixed))
-      return (
-        <Box flexDirection="row" columnGap={3} alignItems="center">
-          <Box flexDirection="row" columnGap={1} alignItems="center">
-            {skyIcon(20)}
-            <Text>
-              <Text bold>{f.windowPercent}%</Text>
-              <Text> {f.level.name}</Text>
-            </Text>
-          </Box>
-          {cols >= 44 && gauge(gaugeCells)}
-          {tail && <Text>{tail}</Text>}
+        <Box flexDirection="row" columnGap={2} alignItems="center">
+          <Text dimColor>Context Forecast starts with Claude's first reply.</Text>
           <Box flexGrow={1} />
           {controls}
         </Box>
       )
     }
+    const band = buildBand(f, r, list, await $.clock.now())
+    const lv = band.level
 
-    // ---- full: aligned stat blocks, a value over its label, the buttons in a
-    // reserved column of their own so the figures never crowd them.
-    type Block = { key: string; width: number; node: RenderElement }
-    const block = (key: string, value: string, label: string, isStrong = true): Block => ({
-      key,
-      width: Math.max(cellWidth(value), cellWidth(label)),
-      node: (
-        <Box key={key} flexDirection="column">
-          <Text bold={isStrong}>{value}</Text>
-          <Text>{label}</Text>
+    const skyIcon = (size: number) => {
+      if (isTerminal) {
+        const { Raster } = $.ui.resolve(e)
+        sky.site = e.requestId
+        sky.level = lv
+        return <Raster key="sky" columns={SKY_COLUMNS} rows={1} cells={skyCells(lv, sky.frame)} />
+      }
+      const { Svg } = $.ui.resolve(e)
+      return <Svg key="sky" source={skySvg(lv, size)} alt={lv.name} width={size} height={size} />
+    }
+    const gaugeCellsWide = cols >= 110 ? 22 : 16
+    const gauge = () => {
+      if (isTerminal) {
+        const { Raster } = $.ui.resolve(e)
+        return <Raster key="gauge" {...gaugeCells(f, gaugeCellsWide)} />
+      }
+      const { Svg } = $.ui.resolve(e)
+      return (
+        <Svg
+          key="gauge"
+          source={gaugeSvg(f, gaugeCellsWide * PX_PER_CELL)}
+          alt={`${Math.round(band.fraction * 100)}% of the way to auto-compact`}
+          width={gaugeCellsWide * PX_PER_CELL}
+          height={20}
+        />
+      )
+    }
+    // The condition keeps its colour outside the button (a button draws its
+    // label in its own style); the line after it is the way into the forecast.
+    const headline = (
+      <Box key="headline" flexDirection="row" columnGap={1} alignItems="center">
+        <Text color={lv.color} weight="semibold">
+          {lv.name}
+        </Text>
+        <Button key="forecast" label={`${band.text} ›`} plain hover={{ underline: true }} hotkey={isTerminal ? 'f' : undefined} onPress={() => void togglePane($)} />
+      </Box>
+    )
+    const isNarrow = cols < 80
+    const planButton = (variant: 'primary' | 'secondary', label: string) => (
+      <Button key="plan" label={label} variant={variant} hotkey={isTerminal ? 'c' : undefined} onPress={() => void planFromBand($)} />
+    )
+    const line = (
+      <Box flexDirection="row" columnGap={2} alignItems="center">
+        <Box flexDirection="row" columnGap={1} alignItems="center">
+          {skyIcon(22)}
+          {headline}
         </Box>
-      ),
-    })
-    const gaugeWidth = cols >= 110 ? 22 : 16
-    const gaugeLabel = left ? `${isAlert ? '⚠ ' : ''}${left}` : 'to auto-compact'
-    const head = block('head', `${f.windowPercent}%  ${f.level.name}`, `${fmtCount(f.tokens)} of ${fmtCount(f.window)}`)
-    const gaugeBlock: Block = {
-      key: 'gauge',
-      width: Math.max(gaugeWidth, cellWidth(gaugeLabel)),
-      node: (
-        <Box key="gauge" flexDirection="column">
-          <Box height={1} alignItems="center">
-            {gauge(gaugeWidth)}
+        {!isNarrow && (
+          <Box flexDirection="row" columnGap={1} alignItems="center">
+            {gauge()}
+            <Text tabular dimColor>
+              {band.figure.split(/(\d[\d,.]*k?)/).map((part, i) => (i % 2 === 1 ? <Text key={`fig-${i}`} mono tabular>{part}</Text> : part))}
+            </Text>
           </Box>
-          <Text>{gaugeLabel}</Text>
-        </Box>
-      ),
-    }
-    // Optional blocks, most telling first; each shows only if it fits.
-    const optional: Block[] = []
-    const limits = [...r.limits].sort((a, b) => b.percentUsed - a.percentUsed)
-    for (const l of limits) {
-      const reset = resetIn(l.resetsAt, now)
-      const warn = l.percentUsed >= 75 ? '⚠ ' : ''
-      optional.push(block(`limit-${l.kind}`, `${warn}${Math.round(l.percentUsed)}%`, `${limitName(l.kind)} limit${reset && l.percentUsed >= 50 ? ` · ${reset}` : ''}`))
-    }
-    if (f.rate !== null) optional.push(block('rate', `+${fmtCount(f.rate)}`, 'per turn'))
-    if (r.usd !== null) optional.push(block('cost', fmtUsd(r.usd), x.perHour !== null ? `${fmtUsd(x.perHour)}/h` : 'session'))
-    if (x.cacheHit !== null) optional.push(block('cache', `${x.cacheHit}%`, 'cache hit'))
-
-    const GAP = 3
-    const buttons = isTerminal ? 16 : 18
-    let budget = cols - buttons - SKY_COLUMNS - 2 - head.width - GAP - gaugeBlock.width
-    const shown = new Set<string>()
-    for (const b of optional) {
-      if (b.width + GAP > budget) continue
-      shown.add(b.key)
-      budget -= b.width + GAP
-    }
-
-    return (
-      <Box flexDirection="row" alignItems="center" gap={2}>
-        {skyIcon(28)}
-        <Box flexDirection="row" columnGap={GAP} alignItems="flex-start">
-          {head.node}
-          {gaugeBlock.node}
-          {optional.filter(b => shown.has(b.key)).map(b => b.node)}
-        </Box>
+        )}
+        {!isNarrow &&
+          band.limits.map(l => (
+            <Text key={`limit-${l.kind}`} tabular color={l.percent >= 90 ? BAD : undefined} dimColor={l.percent < 90}>
+              {l.text}
+            </Text>
+          ))}
         <Box flexGrow={1} />
+        {band.action === 'inline' && planButton('secondary', 'Plan compact')}
         {controls}
+      </Box>
+    )
+    if (band.action !== 'row') return line
+    // Storm: the action gets a row of its own, the one thing to do now.
+    return (
+      <Box flexDirection="column" gap={0}>
+        {line}
+        <Box flexDirection="row" columnGap={2} alignItems="center">
+          <Text color={BAD}>Auto-compact is close. Choose what the summary keeps.</Text>
+          <Box flexGrow={1} />
+          {planButton('primary', 'Plan compact now')}
+        </Box>
       </Box>
     )
   })
@@ -671,10 +607,15 @@ export function register(on: Parameters<Register>[0]): void {
   // ---- minimized: the weather in the prompt footer -----------------------------
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    if ((await read($, bandMode)) !== 'compact') return next(e)
+    const mode = await read($, bandMode)
+    if (mode !== 'compact' && mode !== 'auto') return next(e)
     const r = await read($, reading)
-    const f = forecast(await read($, samples), r)
-    if (!f) return next(e)
+    const list = await read($, samples)
+    const f = forecast(list, r)
+    if (!f || !r) return next(e)
+    // Auto: the footer holds the weather only while the band is folded.
+    if (mode === 'auto' && !buildBand(f, r, list, await $.clock.now()).isCalm) return next(e)
+    const share = `${Math.round(Math.min(f.fraction, 9.99) * 100)}%`
     const { Box, Text, Button } = $.ui.resolve(e)
     const expand = () => void setBandMode($, 'full')
     // The desktop draws this slot as a mode chip and draws only its text, so
@@ -686,23 +627,22 @@ export function register(on: Parameters<Register>[0]): void {
       return (
         <Box flexDirection="row" alignItems="center" columnGap={1}>
           <Raster key="sky" columns={SKY_COLUMNS} rows={1} cells={skyCells(f.level, sky.frame)} />
-          <Button key="expand" label={`${f.windowPercent}%`} plain onPress={expand} />
+          <Button key="expand" label={share} plain onPress={expand} />
           {e.props.modes.length > 0 && <Text dimColor> {e.props.modes.join(' & ')}</Text>}
         </Box>
       )
     }
-    // Two thin spaces (U+2009, about 0.4 of a cell each) on each side give the
-    // chip the model selector's reach; the margin pulls it toward the selector
-    // by the measured 2.5px surplus plus the added trailing pad, so the gap
-    // between the texts stays the selector-to-effort gap.
-    const PAD = '\u2009\u2009'
+    // The desktop draws this slot as a mode chip around the text of what is
+    // drawn here (a Client, having no text, is not drawn at all). The chip's
+    // frame is the desktop's; a plain, dim Button keeps the label pressable.
     return (
-      <Box flexDirection="row" alignItems="center" columnGap={1} marginRight={-1.15}>
-        <Button key="expand" label={`${PAD}${f.level.icon} ${f.windowPercent}%${PAD}`} plain onPress={expand} />
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        <Button key="expand" label={`${f.level.icon} ${share}`} plain dimColor onPress={expand} />
         {e.props.modes.length > 0 && <Text dimColor> {e.props.modes.join(' & ')}</Text>}
       </Box>
     )
   })
+
 
   // ---- the forecast pane ------------------------------------------------------
 

@@ -15,9 +15,14 @@ import {
   topicShift,
 } from '../hooks/insights'
 import type { Row } from '../hooks/insights'
-import { lastCacheTtl, subagentPeak } from '../hooks/history'
+import { inferTtl, lastCacheTtl, subagentPeak } from '../hooks/history'
+import { isAppServer, modelName } from '../hooks/insights'
+import { fmtIn } from '../hooks/forecast'
 import { buildPanel } from '../hooks/panel'
 import { fixture } from '../hooks/fixtures'
+import { buildBand } from '../hooks/band'
+import { forecast } from '../hooks/forecast'
+import { markCompaction } from '../hooks/forecast'
 import { cacheLeft } from '../hooks/pane'
 
 const prompt = (text: string): Row => ({ role: 'user', text, toolUses: [] })
@@ -35,7 +40,9 @@ test('k values: one decimal, thousands separators', async () => {
   // Summary figures: whole k from 10k up.
   expect(fmtKs(9_300)).toBe('9.3k')
   expect(fmtKs(168_400)).toBe('168k')
-  expect(fmtKs(1_000_000)).toBe('1,000k')
+  expect(fmtKs(1_000_000)).toBe('1M')
+  expect(fmtKs(1_500_000)).toBe('1.5M')
+  expect(fmtKs(967_000)).toBe('967k')
 })
 
 test('categories fold into the panel groups; free, buffer and deferred stay out', async () => {
@@ -170,7 +177,7 @@ test('every debug fixture builds a panel in its state', async () => {
   const now = Date.parse('2026-11-08T12:00:00Z')
   const clear = buildPanel(fixture('clear', now))!
   expect(clear.level.name).toBe('Clear')
-  expect(clear.hero).toBe('Plenty of room')
+  expect(clear.hero).toBe('19% to auto-compact')
   const cloudy = buildPanel(fixture('cloudy', now))!
   expect(cloudy.level.name).toBe('Cloudy')
   expect(cloudy.hero).toBe('~14 turns left')
@@ -196,4 +203,69 @@ test('a typed instruction is appended to the planned ones', async () => {
   const chips = plannerChips(scan, {})
   expect(compactInstructions(chips, scan, 'Keep the API contract')).toMatch(/file dumps\. Keep the API contract\.$/)
   expect(compactInstructions(chips, scan, '  ')).toMatch(/file dumps\.$/)
+})
+
+test('band: one line, limits past 50% in a fixed order, actions by weather', async () => {
+  const now = Date.parse('2026-11-08T12:00:00Z')
+  const ends = (...t: number[]) => t.map((tokens, i) => ({ at: i, tokens, output: 0, isCompaction: false, isTurnEnd: true }))
+  const reading = (limits: { kind: string; percentUsed: number; resetsAt?: string }[]) => ({
+    window: 1_000_000, threshold: 800_000, limits, usd: 21.3, startedAt: 0, measuredAt: 0, categories: [],
+  })
+  const quiet = ends(400_000, 405_000, 410_000)
+  const b = buildBand(forecast(quiet, reading([]))!, reading([]), quiet, now)
+  expect(b.level.name).toBe('Cloudy')
+  expect(b.text).toBe('~78 turns until auto-compact')
+  expect(b.action).toBe('none')
+  expect(b.figure).toBe('410k / 800k')
+  // ~78 turns is still something to watch: the band stays up.
+  expect(b.isCalm).toBe(false)
+  const r = reading([
+    { kind: 'seven_day', percentUsed: 62, resetsAt: new Date(now + 2 * 86_400_000).toISOString() },
+    { kind: 'five_hour', percentUsed: 91, resetsAt: new Date(now + 74 * 60_000).toISOString() },
+    { kind: 'seven_day_opus', percentUsed: 12 },
+  ])
+  const withLimits = buildBand(forecast(quiet, r)!, r, quiet, now)
+  expect(withLimits.limits.map(l => l.text)).toEqual(['5h 91% · resets 1h 14m', '7d 62% · resets 2d'])
+  // A limit near its end keeps the band up even when the context is calm.
+  const easy = ends(100_000, 101_000, 102_000)
+  expect(buildBand(forecast(easy, r)!, r, easy, now).isCalm).toBe(false)
+  expect(buildBand(forecast(easy, reading([]))!, reading([]), easy, now).isCalm).toBe(true)
+  const rain = ends(500_000, 530_000, 560_000)
+  expect(buildBand(forecast(rain, r)!, r, rain, now).action).toBe('inline')
+  const storm = ends(640_000, 680_000, 720_000)
+  const s = buildBand(forecast(storm, r)!, r, storm, now)
+  expect(s.action).toBe('row')
+  expect(s.text).toBe('~2 turns until auto-compact')
+  const compacted = markCompaction(storm, 85_000, 9)
+  expect(buildBand(forecast(compacted, r)!, r, compacted, now).text).toBe('Compacted · 720k → 85k')
+  const plenty = ends(100_000, 101_000, 102_000)
+  // With room to spare the band says the share, so the sky has its reason.
+  expect(buildBand(forecast(plenty, r)!, r, plenty, now).text).toBe('13% to auto-compact')
+})
+
+test('cache TTL from behaviour when the transcript cannot be read', async () => {
+  const u = (read: number, write: number) => ({ input_tokens: 2, cache_read_input_tokens: read, cache_creation_input_tokens: write })
+  const t0 = 1_000_000
+  // Read from cache after 20 idle minutes: the entry outlived 5m, so 1h.
+  expect(inferTtl(t0, t0 + 20 * 60_000, u(500_000, 600))).toBe(3_600_000)
+  // Re-written after 20 idle minutes: it lapsed inside the hour, so 5m.
+  expect(inferTtl(t0, t0 + 20 * 60_000, u(0, 500_000))).toBe(300_000)
+  // Requests within five minutes say nothing; nor does a first request.
+  expect(inferTtl(t0, t0 + 60_000, u(500_000, 600))).toBeNull()
+  expect(inferTtl(null, t0, u(500_000, 600))).toBeNull()
+  // Re-written after more than an hour: either lifetime would have lapsed.
+  expect(inferTtl(t0, t0 + 2 * 3_600_000, u(0, 500_000))).toBeNull()
+})
+
+test('model names, app servers and day-long resets read plainly', async () => {
+  expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+  expect(modelName('claude-sonnet-4-5-20250929[1m]')).toBe('Sonnet 4.5')
+  expect(modelName('claude-haiku-5')).toBe('Haiku 5')
+  expect(modelName('Opus 5.5')).toBe('Opus 5.5')
+  expect(isAppServer('Claude_Browser')).toBe(true)
+  expect(isAppServer('claude-in-chrome')).toBe(true)
+  expect(isAppServer('figma')).toBe(false)
+  expect(fmtIn((24 * 60 + 17) * 60_000)).toBe('1d 0h')
+  expect(fmtIn((30 * 60 + 5) * 60_000)).toBe('1d 6h')
+  expect(fmtIn(3 * 86_400_000)).toBe('3d')
 })

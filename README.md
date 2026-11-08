@@ -4,7 +4,7 @@ A weather forecast for your Claude Code context window. Instead of a raw token c
 
 ## What you see
 
-A band above the prompt shows the current condition, how many turns are left until compaction, how much each turn is adding, and your rate-limit and cost figures.
+A one-line band above the prompt answers one question: how much room is left. It shows the condition, then the turns until auto-compact (or, with room to spare, the share of the way there; press it to open the forecast), a gauge toward the threshold and the size behind it (`368k / 800k`). By default the band is **auto**: while there is nothing to act on (Clear, or more than 99 turns left, and no plan limit past 75%) the weather waits in the prompt footer as `☁ 46%`, styled like the model and effort labels beside it; press it (or run the command) to bring the band back, and it comes back by itself when it matters. A plan limit appears only past 50%, with its reset time. In Rain the band offers **Plan compact**; in Storm that becomes a row of its own. Right after a compaction it shows what it freed (`Compacted · 720k → 85k`). Cost and per-turn figures live in the forecast pane. **Minimize** tucks the weather into the prompt footer; **Hide** removes it until you run the command again.
 
 | Condition | Context used (of the auto-compact threshold) | Meaning |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ A band above the prompt shows the current condition, how many turns are left unt
 | ⛈️ Storm | 85%+ | compaction imminent |
 | 🌈 Clearing | just compacted | fresh room |
 
-**Turns left** = room to the auto-compact threshold ÷ growth per turn, where growth is the **median of the last ≤8 turn-to-turn deltas since the last compaction**, negative deltas left out. A single big file read barely moves it. Past 99 turns (or with no growth) it reads "Plenty of room"; until it has seen a turn grow, it says "Measuring growth".
+**Turns left** = room to the auto-compact threshold ÷ growth per turn, where growth is the **median of the last ≤8 turn-to-turn deltas since the last compaction**, negative deltas left out. A single big file read barely moves it. Past 99 turns (or with no growth) it shows the share of the way to auto-compact instead of a count; until it has seen a turn grow, it says "Measuring growth".
 
 ### The forecast pane
 
@@ -23,13 +23,13 @@ A band above the prompt shows the current condition, how many turns are left unt
 1. **Header**: condition, model, used / window.
 2. **Hero**: "~N turns left" to auto-compact, the threshold and typical growth.
 3. **Context bar**: one segment per category, the auto-compact reserve gray at the end.
-4. **What's in context**: tokens per category. An MCP server with ≥5k of schemas and no calls this session is flagged; **Disable…** copies `/mcp` for you to paste.
+4. **What's in context**: tokens per category. An MCP server with ≥5k of schemas and no calls this session is flagged; **Disable…** copies `/mcp` for you to paste (servers the app itself provides are flagged without it, since /mcp cannot turn them off).
 5. **Prompt cache**: warm/cold with the time left of its TTL (minutes, then seconds in the last five), read %, tokens written last turn, and what a cold cache would re-write.
 6. **Subagents**: each run's context → what it handed back, and the total kept out of the main context. Press a row to open that subagent's transcript.
 7. **Limits**: 5-hour and weekly usage with reset times; session cost labelled API-equivalent.
 8. **Plan compact** button: quiet in Clear/Cloudy, primary in Rain, full width with a warning in Storm.
 
-The button opens the **compact planner** card and moves the focus to it (beside the main card when the pane is wide enough; under it otherwise, with the main card folded to its top block): Keep (☑/☐) and Drop (☒/☐) toggles derived from the session (task and plan, files edited, decisions, failing test output, user preferences, old search results, large file dumps), the `/compact` instructions they make, a field to add an instruction of your own, the size after compacting, the best moment (idle, cache warm), **Copy command** and **Compact now** (asks once, showing the before → after size, then runs `/compact` with those instructions; waits while a turn runs). Under it, **Next move**: up to three suggestions, each only when its rule fires (last 3 turns read >30k of files → Explore subagent; CLAUDE.md >8k → move sections into a skill; topic shift → new session with its starting size).
+The button opens the **compact planner** card and moves the focus to it (beside the main card when the pane is wide enough; under it otherwise, with the main card folded to its top block): Keep (☑/☐) and Drop (☒/☐) toggles derived from the session (task and plan, files edited, decisions, failing test output, user preferences, old search results, large file dumps), the `/compact` instructions they make, a field to add an instruction of your own, the size after compacting, the best moment (idle, cache warm), **Copy command** and **Compact now** (asks once, showing the before → after size, then compacts with those instructions; in the desktop app and other headless hosts it runs `/compact` as you would; waits while a turn runs). Under it, **Next move**: up to three suggestions, each only when its rule fires (last 3 turns read >30k of files → Explore subagent; CLAUDE.md >8k → move sections into a skill; topic shift → new session with its starting size).
 
 Figures marked ~ are estimates. Sections with no data (no subagents, no plan limits off a subscription, unknown cache TTL) are hidden.
 
@@ -38,14 +38,14 @@ Figures marked ~ are estimates. Sections with no data (no subagents, no plan lim
 | Panel figure | Source |
 | --- | --- |
 | Used / window, % used | `$.session.usage()` → `context.tokens`, `context.window` (the status line's figures) |
-| Model, auto-compact threshold, bar length, reserve | `$.session.usage({ breakdown: 'summary' })` → `breakdown.model`, `autoCompactThreshold`, `rawMaxTokens`, the `buffer` category |
+| Model (shown as /model names it), auto-compact threshold, bar length, reserve | `$.session.usage({ breakdown: 'summary' })` → `breakdown.model`, `autoCompactThreshold`, `rawMaxTokens`, the `buffer` category |
 | What's in context | `breakdown.categories` (used rows), folded into groups |
 | MCP schema size per server | `breakdown.mcpTools` (loaded schemas) by `serverName` |
 | MCP calls | `mcp__<server>__*` tool calls: counted live (`tool.call`) and in `$.session.messages()` |
 | CLAUDE.md size | `breakdown.memoryFiles` named `CLAUDE.md` |
 | Growth, turns left | each main-thread request's usage (`turn.step`) and turn ends (`session.measure`); history rebuilt from the transcript |
 | Cache read %, written last turn | last request's `cache_read/creation_input_tokens` (`turn.step`, `turn.complete`) |
-| Cache TTL | the transcript's `usage.cache_creation.ephemeral_1h/5m_input_tokens` |
+| Cache TTL | the transcript's `usage.cache_creation.ephemeral_1h/5m_input_tokens`; for a transcript over the 4 MiB read bound, the cache's behaviour across an idle gap (read after >5 min idle → 1h; re-written inside the hour → 5m) |
 | Cache countdown | time of the last main-thread response + TTL |
 | Subagents | `$.agent.list()` (type, description); each agent's `turn.step` usage (its largest context); its `turn.complete` answer (≈ chars ÷ 4); earlier runs from the session's `subagents/agent-*.meta.json` and `.jsonl` |
 | Limits | `usage.rateLimits` (`five_hour`, `seven_day`: `percentUsed`, `resetsAt`) |
@@ -66,10 +66,11 @@ Restart Claude Code to apply.
 
 | Command | Does |
 | --- | --- |
-| `/weather` | Show the band (from any state) |
+| `/weather` | Always show the band (from any state) |
 | `/weather forecast` | Open or close the forecast pane and compact planner |
 | `/weather debug` | Toggle a preview picker in the pane: Live, Clear, Cloudy, Storm, Planner (fixture data); `/weather debug storm` jumps to one |
-| `/weather mini` | Tuck the weather into the prompt footer |
+| `/weather auto` | The default: footer while calm, band when it matters |
+| `/weather mini` | Keep the weather in the prompt footer |
 | `/weather hide` | Hide it; `/weather` brings it back |
 
 If another plugin already owns `/weather` (for example the original `token-weather` sample mod), the same command registers as `/context-forecast` instead: `/context-forecast forecast`, `/context-forecast debug storm`, and so on.

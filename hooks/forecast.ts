@@ -14,10 +14,12 @@ export const GOOD = '#0ca30c'
 export const WARN = '#fab219'
 export const SERIOUS = '#ec835a'
 export const BAD = '#d03b3b'
+// Cloudy is a state to know, not a warning: a calm blue.
+export const CALM = '#4a8fe0'
 
 export const LEVELS: readonly Level[] = [
   { rank: 0, art: 0, icon: '☀️', name: 'Clear', color: GOOD, tag: 'plenty of room' },
-  { rank: 1, art: 2, icon: '☁️', name: 'Cloudy', color: WARN, tag: 'filling up' },
+  { rank: 1, art: 2, icon: '☁️', name: 'Cloudy', color: CALM, tag: 'filling up' },
   { rank: 2, art: 3, icon: '🌧️', name: 'Rain', color: SERIOUS, tag: 'compaction ahead' },
   { rank: 3, art: 4, icon: '⛈️', name: 'Storm', color: BAD, tag: 'compaction imminent' },
 ]
@@ -178,7 +180,8 @@ export function forecast(samples: readonly WeatherSample[], reading: WeatherRead
 
 // The hero line of the panel.
 export function heroText(f: Forecast): string {
-  if (f.isPlenty) return 'Plenty of room'
+  // With room to spare the share says why the sky is what it is (as the band).
+  if (f.isPlenty) return `${Math.round(f.fraction * 100)}% to ${f.isCompactionLimit ? 'auto-compact' : 'full'}`
   if (f.turnsLeft === null) return 'Measuring growth'
   if (f.turnsLeft === 0) return f.isCompactionLimit ? 'Compacting next turn' : 'Window full'
   return `~${f.turnsLeft} turn${f.turnsLeft === 1 ? '' : 's'} left`
@@ -243,7 +246,8 @@ export function fmtIn(ms: number): string {
   const m = Math.round(ms / 60000)
   if (m < 60) return `${m}m`
   const h = Math.floor(m / 60)
-  if (h < 48) return `${h}h ${m % 60}m`
+  if (h < 24) return `${h}h ${m % 60}m`
+  if (h < 48) return `1d ${h - 24}h`
   return `${Math.round(h / 24)}d`
 }
 
@@ -358,15 +362,18 @@ export function gaugeSvg(f: Forecast, w: number): string {
   const y = 7
   const bh = 6
   const now = Math.min(1, f.fraction) * w
-  const ahead = f.outlook.length > 0 ? Math.min(1, f.outlook[f.outlook.length - 1]!.fraction) * w : now
   return (
     svgOpen(w, h) +
     `<rect x="0" y="${y}" width="${w}" height="${bh}" rx="3" fill="${f.level.color}" fill-opacity=".18"/>` +
-    (ahead > now ? `<rect x="0" y="${y}" width="${ahead.toFixed(1)}" height="${bh}" rx="3" fill="${f.level.color}" fill-opacity=".38"/>` : '') +
     `<rect x="0" y="${y}" width="${Math.max(3, now).toFixed(1)}" height="${bh}" rx="3" fill="${f.level.color}"/>` +
-    `<rect x="${(w - 2).toFixed(1)}" y="4" width="2" height="${h - 8}" rx="1" fill="${BAD}" fill-opacity=".7"/>` +
+    `<rect x="${(w - 2).toFixed(1)}" y="4" width="2" height="${h - 8}" rx="1" fill="${markerColor(f)}" fill-opacity=".7"/>` +
     '</svg>'
   )
+}
+
+// The auto-compact mark at the gauge's end: neutral until the weather turns.
+function markerColor(f: Forecast): string {
+  return f.level.rank === 2 || f.level.rank === 3 ? BAD : MUTED
 }
 
 // A meter: severity in the fill, the same hue paler in the track.
@@ -508,12 +515,10 @@ export function stackCells(slices: readonly Slice[], total: number, columns: num
 export function gaugeCells(f: Forecast, columns: number) {
   const words: number[] = []
   const now = Math.round(Math.min(1, f.fraction) * columns)
-  const ahead = f.outlook.length > 0 ? Math.round(Math.min(1, f.outlook[f.outlook.length - 1]!.fraction) * columns) : now
   const color = hex(f.level.color)
   for (let c = 0; c < columns; c += 1) {
-    if (c === columns - 1 && now < columns) words.push(0x2502, hex(BAD), DEFAULT)
+    if (c === columns - 1 && now < columns) words.push(0x2502, hex(markerColor(f)), DEFAULT)
     else if (c < Math.max(1, now)) words.push(0x2588, color, DEFAULT)
-    else if (c < ahead) words.push(0x2592, color, DEFAULT)
     else words.push(0x2591, hex(MUTED), DEFAULT)
   }
   return { columns, rows: 1, cells: pack(words) }

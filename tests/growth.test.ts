@@ -70,12 +70,12 @@ test('right after a compaction the forecast shows the clearing and waits for gro
   expect(heroText(f)).toBe('Measuring growth')
 })
 
-test('over 99 turns reads "Plenty of room"', async () => {
+test('over 99 turns reads the share to auto-compact instead of a count', async () => {
   // +1k a turn with 140k to go: 140 turns.
   const f = forecast(ends(18_000, 19_000, 20_000), reading())!
   expect(f.isPlenty).toBe(true)
   expect(f.turnsLeft).toBeNull()
-  expect(heroText(f)).toBe('Plenty of room')
+  expect(heroText(f)).toBe('13% to auto-compact')
   expect(f.outlook.length).toBe(5)
 })
 

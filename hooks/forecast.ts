@@ -1,10 +1,13 @@
 import type { WeatherReading, WeatherSample } from '../types'
 import { SKY_DEFS, SKY_STYLE, skyBody } from './sky'
 
-export type Level = { rank: number; icon: string; name: string; color: string; tag: string }
+// `art` picks the sky drawing (sky.ts), kept apart from `rank` so the scale can
+// change without redrawing the skies.
+export type Level = { rank: number; art: number; icon: string; name: string; color: string; tag: string }
 
-// Conditions by how far the context is toward compaction (or the window when
-// auto-compaction is off). Rank 5 is the clearing right after a compaction.
+// Conditions by how far the context is toward the auto-compact threshold (or
+// the window when auto-compaction is off). Rank 4 is the clearing right after
+// a compaction.
 // Conditions are states, so they wear the status palette, each always shown
 // with its icon and name, never by color alone.
 export const GOOD = '#0ca30c'
@@ -13,25 +16,30 @@ export const SERIOUS = '#ec835a'
 export const BAD = '#d03b3b'
 
 export const LEVELS: readonly Level[] = [
-  { rank: 0, icon: '☀️', name: 'Clear', color: GOOD, tag: 'plenty of room' },
-  { rank: 1, icon: '🌤️', name: 'Fair', color: GOOD, tag: 'comfortable' },
-  { rank: 2, icon: '☁️', name: 'Cloudy', color: WARN, tag: 'filling up' },
-  { rank: 3, icon: '🌧️', name: 'Showers', color: SERIOUS, tag: 'compaction ahead' },
-  { rank: 4, icon: '⛈️', name: 'Storm', color: BAD, tag: 'compaction imminent' },
+  { rank: 0, art: 0, icon: '☀️', name: 'Clear', color: GOOD, tag: 'plenty of room' },
+  { rank: 1, art: 2, icon: '☁️', name: 'Cloudy', color: WARN, tag: 'filling up' },
+  { rank: 2, art: 3, icon: '🌧️', name: 'Rain', color: SERIOUS, tag: 'compaction ahead' },
+  { rank: 3, art: 4, icon: '⛈️', name: 'Storm', color: BAD, tag: 'compaction imminent' },
 ]
 export const CLEARING: Level = {
-  rank: 5,
+  rank: 4,
+  art: 5,
   icon: '🌈',
   name: 'Clearing',
   color: GOOD,
   tag: 'just compacted',
 }
 
-const CUTS = [0.35, 0.55, 0.7, 0.85]
+// Share of the auto-compact threshold where each condition starts.
+export const CUTS = [0.3, 0.6, 0.85]
+// The ranks that warn: Rain and Storm.
+export const isAlertRank = (rank: number) => rank === 2 || rank === 3
+// Past this many turns the hero reads "Plenty of room".
+export const TURNS_CAP = 99
 
 export function levelOf(fraction: number): Level {
   const rank = CUTS.findIndex(cut => fraction < cut)
-  return LEVELS[rank === -1 ? 4 : rank]!
+  return LEVELS[rank === -1 ? LEVELS.length - 1 : rank]!
 }
 
 export function severity(percent: number): string {
@@ -54,6 +62,8 @@ export type Forecast = {
   requestsPerTurn: number
   turns: number
   turnsLeft: number | null
+  // More than TURNS_CAP turns left, or no growth at all: "Plenty of room".
+  isPlenty: boolean
   outlook: Outlook[]
   lastTurn: { requests: number; growth: number; output: number } | null
 }
@@ -74,18 +84,27 @@ function turnEnds(samples: readonly WeatherSample[]): WeatherSample[] {
   return ends
 }
 
-// Mean growth per turn over the last few turns since the latest compaction,
-// falling back to the growth across the one turn seen; `basis` is how many
-// turns the mean stands on, null rate while the context has not grown.
+export function median(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b)
+  const mid = s.length >> 1
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2
+}
+
+// Growth per turn: the median of the last ≤8 turn-to-turn deltas since the
+// latest compaction, negative deltas left out (a shrink is not growth), so one
+// spike moves it little. Before two turn ends exist, the growth across the one
+// turn seen. `basis` is how many deltas it stands on; `rate` is null until a
+// delta exists, and 0 when the context has held still.
 export function growthRate(samples: readonly WeatherSample[]): { rate: number | null; basis: number } {
   const recent = sinceCompaction(samples)
-  const ends = turnEnds(recent).slice(-6)
-  const rises: number[] = []
+  const ends = turnEnds(recent)
+  const deltas: number[] = []
   for (let i = 1; i < ends.length; i += 1) {
     const d = ends[i]!.tokens - ends[i - 1]!.tokens
-    if (d > 0) rises.push(d)
+    if (d >= 0) deltas.push(d)
   }
-  if (rises.length > 0) return { rate: rises.reduce((a, b) => a + b, 0) / rises.length, basis: rises.length }
+  const last8 = deltas.slice(-8)
+  if (last8.length > 0) return { rate: median(last8), basis: last8.length }
   const first = recent[0]
   const last = recent[recent.length - 1]
   return first && last && last.tokens > first.tokens ? { rate: last.tokens - first.tokens, basis: 1 } : { rate: null, basis: 0 }
@@ -106,10 +125,12 @@ export function forecast(samples: readonly WeatherSample[], reading: WeatherRead
   const limit = reading.threshold && reading.threshold > 0 ? reading.threshold : reading.window
   const fraction = last.tokens / limit
   const { rate, basis: rateBasis } = growthRate(samples)
-  const turnsLeft =
-    rate === null ? null : last.tokens >= limit ? 0 : Math.max(1, Math.ceil((limit - last.tokens) / rate))
+  const raw =
+    rate === null ? null : last.tokens >= limit ? 0 : rate <= 0 ? Infinity : Math.max(1, Math.ceil((limit - last.tokens) / rate))
+  const isPlenty = raw !== null && raw > TURNS_CAP
+  const turnsLeft = raw === null || isPlenty ? null : raw
   const outlook: Outlook[] = []
-  if (rate !== null) {
+  if (rate !== null && rate > 0) {
     for (let step = 1; step <= 5; step += 1) {
       const tokens = last.tokens + rate * step
       const f = tokens / limit
@@ -149,9 +170,18 @@ export function forecast(samples: readonly WeatherSample[], reading: WeatherRead
     requestsPerTurn,
     turns: ends + (last.isTurnEnd ? 0 : 1),
     turnsLeft,
+    isPlenty,
     outlook,
     lastTurn,
   }
+}
+
+// The hero line of the panel.
+export function heroText(f: Forecast): string {
+  if (f.isPlenty) return 'Plenty of room'
+  if (f.turnsLeft === null) return 'Measuring growth'
+  if (f.turnsLeft === 0) return f.isCompactionLimit ? 'Compacting next turn' : 'Window full'
+  return `~${f.turnsLeft} turn${f.turnsLeft === 1 ? '' : 's'} left`
 }
 
 // Adds one model request's reading; the same figure twice in a row is one.
@@ -160,6 +190,12 @@ export function addRequest(samples: readonly WeatherSample[], tokens: number, ou
   if (prev && prev.tokens === tokens && !prev.isTurnEnd) return samples as WeatherSample[]
   const isCompaction = prev !== undefined && tokens < prev.tokens * 0.7
   return [...samples, { at, tokens, output, isCompaction, isTurnEnd: false }].slice(-400)
+}
+
+// A compaction the engine reported (`session.compact`'s `tokensAfter`): the
+// point the forecast restarts from, so growth only counts what follows it.
+export function markCompaction(samples: readonly WeatherSample[], tokens: number, at: number): WeatherSample[] {
+  return [...samples, { at, tokens, output: 0, isCompaction: true, isTurnEnd: true }].slice(-400)
 }
 
 // Closes the turn at the session's own reading of the context.
@@ -196,11 +232,10 @@ export function limitName(kind: string, isLong = false): string {
 
 // Each condition's span of the way to auto-compact, for the terminal's scale.
 export const LEVEL_SPANS: readonly { level: Level; range: string }[] = [
-  { level: LEVELS[0]!, range: '<35%' },
-  { level: LEVELS[1]!, range: '35–55%' },
-  { level: LEVELS[2]!, range: '55–70%' },
-  { level: LEVELS[3]!, range: '70–85%' },
-  { level: LEVELS[4]!, range: '85%+' },
+  { level: LEVELS[0]!, range: '<30%' },
+  { level: LEVELS[1]!, range: '30–60%' },
+  { level: LEVELS[2]!, range: '60–85%' },
+  { level: LEVELS[3]!, range: '85%+' },
 ]
 
 export function fmtIn(ms: number): string {
@@ -489,6 +524,7 @@ export function gaugeCells(f: Forecast, columns: number) {
 export function scaleSvg(f: Forecast, w: number): string {
   const h = 78
   const cuts = [0, ...CUTS, 1]
+  const LAST = LEVELS.length - 1
   const parts = [
     svgOpen(w, h, 'font-size="11"'),
     SKY_STYLE.replace('</style>', '.still *{animation:none!important}</style>'),
@@ -502,11 +538,11 @@ export function scaleSvg(f: Forecast, w: number): string {
     const icon = isNow ? 24 : 20
     parts.push(
       `<g class="${isNow ? '' : 'still'}" opacity="${isNow ? 1 : 0.75}"><svg x="${(mid - icon / 2).toFixed(1)}" y="${isNow ? 0 : 3}" width="${icon}" height="${icon}" viewBox="0 0 32 32" overflow="visible">${skyBody(level)}</svg></g>`,
-      `<rect x="${(x0 + (i === 0 ? 0 : 1)).toFixed(1)}" y="32" width="${(x1 - x0 - (i === 0 || i === 4 ? 1 : 2)).toFixed(1)}" height="6" ` +
-        `${i === 0 ? 'rx="3"' : i === 4 ? 'rx="3"' : ''} fill="${level.color}" fill-opacity="${isNow ? 1 : 0.3}"/>`,
+      `<rect x="${(x0 + (i === 0 ? 0 : 1)).toFixed(1)}" y="32" width="${(x1 - x0 - (i === 0 || i === LAST ? 1 : 2)).toFixed(1)}" height="6" ` +
+        `${i === 0 || i === LAST ? 'rx="3"' : ''} fill="${level.color}" fill-opacity="${isNow ? 1 : 0.3}"/>`,
       `<text x="${mid.toFixed(1)}" y="55" text-anchor="middle" fill="${MUTED}" font-weight="${isNow ? 700 : 400}">${level.name}</text>`,
       `<text x="${mid.toFixed(1)}" y="70" text-anchor="middle" fill="${MUTED}" font-size="10" opacity=".8">` +
-        `${i === 4 ? `${Math.round(cuts[i]! * 100)}%+` : `${Math.round(cuts[i]! * 100)}–${Math.round(cuts[i + 1]! * 100)}%`}</text>`,
+        `${i === LAST ? `${Math.round(cuts[i]! * 100)}%+` : `${Math.round(cuts[i]! * 100)}–${Math.round(cuts[i + 1]! * 100)}%`}</text>`,
     )
   })
   const mx = Math.max(4, Math.min(w - 4, Math.min(1, f.fraction) * w))

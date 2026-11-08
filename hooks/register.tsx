@@ -1,11 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderElement } from 'claude-code'
+import type { EngineInterface, Register, RenderElement, SessionCompactResult } from 'claude-code'
 
-import type { BandMode, WeatherReading, WeatherTurn } from '../types'
+import type { AgentRun, BandMode, DebugState, WeatherReading, WeatherTurn } from '../types'
 import {
   addRequest,
-  chartCells,
-  chartSvg,
   endTurn,
   fmtIn,
   fmtCount,
@@ -13,22 +11,20 @@ import {
   forecast,
   gaugeCells,
   gaugeSvg,
+  isAlertRank,
   limitName,
-  meter,
-  meterSvg,
-  PALETTE,
-  LEVEL_SPANS,
-  panePx,
-  scaleSvg,
+  markCompaction,
   PX_PER_CELL,
-  severity,
-  stackCells,
-  stackSvg,
   turnsPhrase,
 } from './forecast'
-import type { Forecast, Level, Slice } from './forecast'
+import type { Forecast, Level } from './forecast'
 import { SKY_COLUMNS, skyCells, skySvg } from './sky'
-import { parseTranscript, transcriptPath } from './history'
+import { lastCacheTtl, parseTranscript, subagentPeak, transcriptPath } from './history'
+import { groupCategories, compactCommand, scanSession, serverOfTool, tokensOf } from './insights'
+import { buildPanel } from './panel'
+import type { PanelInput } from './panel'
+import { fixture } from './fixtures'
+import { PLANNER_FOCUS, cacheLeft, drawPane } from './pane'
 
 const PANE = 'context-forecast'
 const TITLE = 'Context Forecast'
@@ -38,6 +34,17 @@ const reading = atom({ plugin: 'context-forecast', key: 'reading' } as const, nu
 const lastTurn = atom({ plugin: 'context-forecast', key: 'lastTurn' } as const, null)
 const bandMode = atom({ plugin: 'context-forecast', key: 'bandMode' } as const, 'full' as BandMode)
 const lastLevel = atom({ plugin: 'context-forecast', key: 'lastLevel' } as const, -1)
+const cacheAtom = atom({ plugin: 'context-forecast', key: 'cache' } as const, null)
+const agentsAtom = atom({ plugin: 'context-forecast', key: 'agents' } as const, [] as AgentRun[])
+const scanAtom = atom({ plugin: 'context-forecast', key: 'scan' } as const, null)
+const overridesAtom = atom({ plugin: 'context-forecast', key: 'chipOverrides' } as const, {} as Record<string, boolean>)
+const viewAtom = atom({ plugin: 'context-forecast', key: 'view' } as const, 'main' as 'main' | 'planner')
+const debugOnAtom = atom({ plugin: 'context-forecast', key: 'isDebugOn' } as const, false)
+const debugAtom = atom({ plugin: 'context-forecast', key: 'debug' } as const, null as DebugState)
+const confirmAtom = atom({ plugin: 'context-forecast', key: 'isConfirming' } as const, false)
+const extraAtom = atom({ plugin: 'context-forecast', key: 'extraInstruction' } as const, '')
+const runningAtom = atom({ plugin: 'context-forecast', key: 'isTurnRunning' } as const, false)
+const mcpCallsAtom = atom({ plugin: 'context-forecast', key: 'mcpCalls' } as const, {} as Record<string, number>)
 
 type Api = EngineInterface
 
@@ -62,36 +69,106 @@ async function animateSky($: Api): Promise<void> {
 
 // ---- gathering ------------------------------------------------------------------
 
+// Where this session's transcript is, or null.
+async function findTranscript($: Api): Promise<string | null> {
+  const [id, cwd, root, configDir, home] = await Promise.all([
+    $.session.id(),
+    $.session.cwd(),
+    $.session.root(),
+    $.env.get('CLAUDE_CONFIG_DIR'),
+    $.env.get('HOME'),
+  ])
+  const dir = configDir ?? (home ? `${home}/.claude` : null)
+  if (!dir) return null
+  for (const base of [root, cwd]) {
+    const p = transcriptPath(dir, base, id)
+    if (await $.fs.exists(p)) return p
+  }
+  return null
+}
+
 // Rebuilds the history from this session's transcript, so a resumed session or
 // a reload starts with its whole past instead of one point.
 async function backfill($: Api): Promise<void> {
   try {
-    const [id, cwd, root, configDir, home] = await Promise.all([
-      $.session.id(),
-      $.session.cwd(),
-      $.session.root(),
-      $.env.get('CLAUDE_CONFIG_DIR'),
-      $.env.get('HOME'),
-    ])
-    const dir = configDir ?? (home ? `${home}/.claude` : null)
-    if (!dir) return
-    let path: string | null = null
-    for (const base of [root, cwd]) {
-      const p = transcriptPath(dir, base, id)
-      if (await $.fs.exists(p)) {
-        path = p
-        break
-      }
-    }
+    const path = await findTranscript($)
     if (!path) return
     // A transcript over the 4 MiB read bound throws; the forecast then builds
     // from live readings instead of the past.
     const text = await $.fs.read(path)
     const history = parseTranscript(text)
     if (history.length > 0) await update($, samples, () => history)
+    await readTtl($, text)
+    await backfillAgents($, path.replace(/\.jsonl$/, '/subagents'))
   } catch {
     // No history to be had: the forecast builds from live readings instead.
   }
+}
+
+// The cache lifetime in effect, from the transcript's last cache write.
+async function readTtl($: Api, text?: string): Promise<void> {
+  try {
+    if (text === undefined) {
+      const path = await findTranscript($)
+      if (!path) return
+      text = await $.fs.read(path)
+    }
+    const ttl = lastCacheTtl(text)
+    if (!ttl) return
+    await update($, cacheAtom, c => (c ? { ...c, ttlMs: ttl.ttlMs } : { lastRequestAt: ttl.at, ttlMs: ttl.ttlMs, read: 0, write: 0, input: 0 }))
+  } catch {
+    // Over the read bound: the TTL stays as last seen.
+  }
+}
+
+// Subagents that ran before the mod loaded: `subagents/agent-<id>.meta.json`
+// names the type, its `.jsonl` holds each request's usage.
+async function backfillAgents($: Api, dir: string): Promise<void> {
+  if (!(await $.fs.exists(dir))) return
+  const known = new Set((await read($, agentsAtom)).map(a => a.id))
+  const found: AgentRun[] = []
+  for (const entry of await $.fs.list(dir)) {
+    const m = /^agent-(.+)\.meta\.json$/.exec(entry.name)
+    if (!m || known.has(m[1]!)) continue
+    try {
+      const meta = JSON.parse(await $.fs.read(`${dir}/${entry.name}`)) as { agentType?: string; description?: string; finished?: boolean }
+      const log = `${dir}/agent-${m[1]}.jsonl`
+      const input = (await $.fs.exists(log)) ? subagentPeak(await $.fs.read(log)) : 0
+      found.push({ id: m[1]!, type: meta.agentType ?? 'agent', description: meta.description ?? '', input, returned: null, isRunning: meta.finished === false })
+    } catch {
+      // An unreadable record: leave that agent out.
+    }
+  }
+  if (found.length > 0) await update($, agentsAtom, list => [...list, ...found])
+}
+
+// The conversation since the latest compaction, read for the planner, the
+// next-move rules, MCP calls and what each subagent handed back.
+async function rescan($: Api): Promise<void> {
+  try {
+    const rows = await $.session.messages()
+    if (!Array.isArray(rows)) return
+    const scan = scanSession(rows as never)
+    await update($, scanAtom, () => scan)
+    const returned = new Map<string, number>()
+    for (const r of rows as { toolUses?: { tool: string; agentId?: string; text?: string }[] }[]) {
+      for (const u of r.toolUses ?? []) if (u.agentId && u.text !== undefined) returned.set(u.agentId, tokensOf(u.text))
+    }
+    await update($, agentsAtom, list => list.map(a => (a.returned === null && returned.has(a.id) && !a.isRunning ? { ...a, returned: returned.get(a.id)! } : a)))
+  } catch {
+    // No messages to read (a test, a -p run): the planner waits.
+  }
+}
+
+async function noteAgent($: Api, id: string, patch: (a: AgentRun) => AgentRun): Promise<void> {
+  const list = await read($, agentsAtom)
+  if (!list.some(a => a.id === id)) {
+    const info = (await $.agent.list()).find(a => a.id === id)
+    const fresh: AgentRun = { id, type: info?.type ?? 'agent', description: info?.description ?? '', input: 0, returned: null, isRunning: true }
+    await update($, agentsAtom, l => [...l, patch(fresh)].slice(-12))
+    return
+  }
+  await update($, agentsAtom, l => l.map(a => (a.id === id ? patch(a) : a)))
 }
 
 // Reads the session's figures (and the local /context estimate for the
@@ -111,6 +188,12 @@ async function measure($: Api, isTurnEnd: boolean): Promise<void> {
       .sort((x, y) => y.tokens - x.tokens)
       .slice(0, 6)
       .map(c => ({ name: c.name, tokens: c.tokens })),
+    model: b?.model,
+    barMax: b?.rawMaxTokens,
+    reserve: (b?.categories ?? []).filter(c => c.kind === 'buffer').reduce((a, c) => a + c.tokens, 0),
+    groups: groupCategories(b?.categories ?? []),
+    mcpTools: (b?.mcpTools ?? []).map(t => ({ name: t.name, serverName: t.serverName, tokens: t.tokens, isLoaded: t.isLoaded })),
+    claudeMdTokens: (b?.memoryFiles ?? []).filter(m => /CLAUDE(\.local)?\.md$/i.test(m.path)).reduce((a, m) => a + m.tokens, 0),
   }
   await update($, reading, () => next)
   const tokens = usage.context.tokens
@@ -127,7 +210,7 @@ async function afterMeasure($: Api): Promise<void> {
   const before = await read($, lastLevel)
   const rank = f.level.rank
   await update($, lastLevel, () => rank)
-  if (rank >= 3 && rank <= 4 && rank > before && before !== -1) {
+  if (isAlertRank(rank) && rank > before && before !== -1) {
     const turns = turnsPhrase(f)
     $.ui.toast(`${f.level.icon} ${f.level.name} warning: context ${f.windowPercent}%${turns ? `, ${turns}` : ''}`, {
       timeoutMs: 8000,
@@ -140,9 +223,79 @@ async function setBandMode($: Api, mode: BandMode): Promise<void> {
   if (mode === 'hidden') $.ui.toast('Context Forecast hidden · /weather brings it back')
 }
 
-async function refresh($: Api): Promise<void> {
-  await backfill($)
-  await measure($, false)
+// A compaction that stood: the forecast restarts from what it left, and the
+// planner forgets the conversation it planned for.
+async function afterCompaction($: Api, ran: SessionCompactResult): Promise<void> {
+  if (ran.skip !== undefined) return
+  const at = await $.clock.now()
+  const after = ran.tokensAfter
+  if (after !== undefined) await update($, samples, list => markCompaction(list, after, at))
+  await update($, overridesAtom, () => ({}))
+  await update($, scanAtom, () => null)
+}
+
+// What the pane draws: live state, or a fixture while a debug preview is on.
+async function panelInput($: Api): Promise<PanelInput> {
+  const now = await $.clock.now()
+  const debug = await read($, debugAtom)
+  if (debug) return { ...fixture(debug, now), overrides: await read($, overridesAtom), extra: await read($, extraAtom) }
+  return {
+    samples: await read($, samples),
+    reading: await read($, reading),
+    turn: await read($, lastTurn),
+    cache: await read($, cacheAtom),
+    agents: await read($, agentsAtom),
+    scan: await read($, scanAtom),
+    mcpCalls: await read($, mcpCallsAtom),
+    overrides: await read($, overridesAtom),
+    extra: await read($, extraAtom),
+    isTurnRunning: await read($, runningAtom),
+    now,
+  }
+}
+
+async function plannedInstructions($: Api): Promise<string | null> {
+  const p = buildPanel(await panelInput($))
+  return p?.planner?.instructions ?? null
+}
+
+async function copyCommand($: Api, surface: string): Promise<void> {
+  const text = await plannedInstructions($)
+  if (text === null) return
+  const r = await $.ui.copy({ text: compactCommand(text), surface: surface as never })
+  $.ui.toast(r.isCopied ? 'Copied /compact command' : `Could not copy: ${r.reason ?? 'no clipboard'}`)
+}
+
+async function compactNow($: Api): Promise<void> {
+  if (await read($, runningAtom)) {
+    $.ui.toast('A turn is running: compact when it ends, or copy the command')
+    return
+  }
+  // The first press arms; the second compacts. Compaction cannot be undone.
+  if (!(await read($, confirmAtom))) {
+    await update($, confirmAtom, () => true)
+    return
+  }
+  await update($, confirmAtom, () => false)
+  if (await read($, debugAtom)) {
+    $.ui.toast('Preview only: switch the preview to Live to compact')
+    return
+  }
+  const instructions = await plannedInstructions($)
+  if (instructions === null) return
+  try {
+    // The engine skips this plugin's own session.compact hook for a call it
+    // made, so the forecast restarts here.
+    const r = await $.session.compact({ instructions })
+    if (r.skip !== undefined) $.ui.toast(`Compaction skipped: ${r.skip}`)
+    else {
+      await afterCompaction($, r)
+      await update($, extraAtom, () => '')
+      await update($, viewAtom, () => 'main')
+    }
+  } catch (err) {
+    $.ui.toast(`Could not compact: ${(err as Error).message}`)
+  }
 }
 
 async function togglePane($: Api): Promise<string> {
@@ -188,6 +341,7 @@ async function facts($: Api): Promise<Facts | null> {
 }
 
 function turnsLeftShort(f: Forecast): string | null {
+  if (f.isPlenty) return 'plenty of room'
   if (f.turnsLeft === null) return null
   return f.turnsLeft === 0 ? 'compacting' : `~${f.turnsLeft} turn${f.turnsLeft === 1 ? '' : 's'} left`
 }
@@ -208,32 +362,112 @@ function resetIn(resetsAt: string | undefined, now: number): string | null {
   return Number.isFinite(ms) ? fmtIn(ms) : null
 }
 
+// The command, under whichever name it registered.
+async function weatherCommand($: Api, args: string): Promise<{ text: string }> {
+  const arg = args.trim().toLowerCase()
+  const preset = /^debug\s+(live|clear|cloudy|storm|planner)$/.exec(arg)
+  if (preset) {
+    // `/weather debug <state>` jumps straight to a preview.
+    const state = preset[1] === 'live' ? null : (preset[1] as DebugState)
+    await update($, debugOnAtom, () => true)
+    await update($, debugAtom, () => state)
+    if (!(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: TITLE })
+    return { text: `Previewing ${preset[1]}.` }
+  }
+  if (arg === 'debug') {
+    const isOn = !(await read($, debugOnAtom))
+    await update($, debugOnAtom, () => isOn)
+    if (!isOn) await update($, debugAtom, () => null)
+    if (isOn && !(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: TITLE })
+    return { text: isOn ? 'Debug preview on: pick a state at the top of the forecast.' : 'Debug preview off.' }
+  }
+  if (arg === 'forecast') {
+    await measure($, false)
+    return { text: await togglePane($) }
+  }
+  if (arg === 'hide') {
+    await setBandMode($, 'hidden')
+    return { text: 'Context Forecast hidden.' }
+  }
+  if (arg === 'mini') {
+    await setBandMode($, 'compact')
+    return { text: 'Context Forecast minimized to the footer.' }
+  }
+  // Bare /weather brings the band back, whatever state it was in.
+  await measure($, false)
+  await setBandMode($, 'full')
+  return { text: 'Context Forecast band shown.' }
+}
+
 export function register(on: Parameters<Register>[0]): void {
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'weather',
-      description: 'Context Forecast: show the band; `forecast` opens the forecast, `mini` minimizes, `hide` hides',
-      argumentHint: '[forecast|mini|hide]',
-      immediate: true,
-    })
+    // `/weather` is the name; where another plugin (the original token-weather
+    // sample) holds it, the same command answers as `/context-forecast`
+    // (`/forecast` is taken by the sales plugin's skill).
+    for (const name of ['weather', 'context-forecast']) {
+      try {
+        await $.command.register({
+          name,
+          description: 'Context Forecast: show the band; `forecast` opens the forecast, `mini` minimizes, `hide` hides, `debug` previews',
+          argumentHint: '[forecast|mini|hide|debug]',
+          immediate: true,
+        })
+        break
+      } catch {
+        // Taken: try the next name.
+      }
+    }
     const ran = await next(e)
     $.ui.status(undefined)
     $.clock.every(450, () => tickSky($))
+    // The cache countdown ticks once a second while the pane shows it.
+    $.clock.every(1000, () => void tickPane($))
+    await update($, runningAtom, () => false)
     await backfill($)
     await measure($, true)
+    await rescan($)
     return ran
   })
 
   // Every main-thread model request is a reading: the band moves while a long
-  // turn runs, not only when it ends.
+  // turn runs, not only when it ends. A subagent's requests size its context.
   on('turn.step', async function* ($, e, next) {
     const ran = yield* next(e)
     const u = ran.usage
-    if (e.agentId === undefined && u) {
-      const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-      const at = await $.clock.now()
+    if (!u) return ran
+    const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+    const at = await $.clock.now()
+    if (e.agentId === undefined) {
       await update($, samples, list => addRequest(list, tokens, u.output_tokens, at))
+      await update($, cacheAtom, c => ({
+        lastRequestAt: at,
+        ttlMs: c?.ttlMs ?? null,
+        read: u.cache_read_input_tokens,
+        write: u.cache_creation_input_tokens,
+        input: u.input_tokens,
+      }))
+    } else {
+      await noteAgent($, e.agentId, a => ({ ...a, input: Math.max(a.input, tokens), isRunning: true }))
     }
+    return ran
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await update($, runningAtom, () => true)
+    return next(e)
+  })
+
+  // MCP calls, counted as they happen (the conversation may lose them to a
+  // compaction).
+  on('tool.call', async ($, e, next) => {
+    if (serverOfTool(e.tool) !== null) await update($, mcpCallsAtom, c => ({ ...c, [e.tool]: (c[e.tool] ?? 0) + 1 }))
+    return next(e)
+  })
+
+  // A compaction restarts the forecast from what it left.
+  on('session.compact', async ($, e, next) => {
+    const ran = await next(e)
+    if (e.trigger !== 'precompute' && e.agentId === undefined) await afterCompaction($, ran)
     return ran
   })
 
@@ -254,7 +488,14 @@ export function register(on: Parameters<Register>[0]): void {
 
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
-    if (e.agentId === undefined && e.usage) {
+    if (e.agentId !== undefined) {
+      // A subagent's answer is what it hands back to the main context.
+      const returned = tokensOf(e.answer)
+      await noteAgent($, e.agentId, a => ({ ...a, returned, isRunning: false }))
+      return ran
+    }
+    await update($, runningAtom, () => false)
+    if (e.usage) {
       const u = e.usage
       const turn: WeatherTurn = {
         input: u.input_tokens,
@@ -264,29 +505,13 @@ export function register(on: Parameters<Register>[0]): void {
       }
       await update($, lastTurn, () => turn)
     }
+    await readTtl($)
+    await rescan($)
     return ran
   })
 
-  on('command.run', { command: 'weather' }, async ($, e) => {
-    const arg = e.args.trim().toLowerCase()
-    if (arg === 'forecast') {
-      await measure($, false)
-      return { text: await togglePane($) }
-    }
-    if (arg === 'hide') {
-      await setBandMode($, 'hidden')
-      return { text: 'Context Forecast hidden.' }
-    }
-    if (arg === 'mini') {
-      await setBandMode($, 'compact')
-      return { text: 'Context Forecast minimized to the footer.' }
-    }
-    // Bare /weather brings the band back, whatever state it was in.
-    await measure($, false)
-    await setBandMode($, 'full')
-    return { text: 'Context Forecast band shown.' }
-  })
-
+  on('command.run', { command: 'context-forecast' }, ($, e) => weatherCommand($, e.args))
+  on('command.run', { command: 'weather' }, ($, e) => weatherCommand($, e.args))
   // ---- the band above the prompt ----------------------------------------------
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -325,7 +550,7 @@ export function register(on: Parameters<Register>[0]): void {
       )
     }
     const { f, r, now } = x
-    const isAlert = f.level.rank >= 3 && f.level.rank <= 4
+    const isAlert = isAlertRank(f.level.rank)
     const left = turnsLeftShort(f)
 
     const gauge = (cells: number) => {
@@ -482,227 +707,79 @@ export function register(on: Parameters<Register>[0]): void {
   // ---- the forecast pane ------------------------------------------------------
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const x = await facts($)
-    const list = await read($, samples)
-    const mode = await read($, bandMode)
-    const cols = e.props.bodyColumns
-    const isTerminal = e.surface === 'terminal'
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const close = () => void $.ui.close({ id: PANE })
-    const refreshPane = () => void refresh($)
-    const nextMode: BandMode = mode === 'full' ? 'compact' : mode === 'compact' ? 'hidden' : 'full'
-    const cycleBand = () => void setBandMode($, nextMode)
-
-    const actions = (
-      <Box flexDirection="row" gap={1}>
-        <Button key="refresh" label="Refresh" plain hotkey={isTerminal ? 'r' : undefined} onPress={refreshPane} />
-        <Button key="band" label={`Band: ${mode === 'full' ? 'Full' : mode === 'compact' ? 'Compact' : 'Hidden'}`} plain hotkey={isTerminal ? 'b' : undefined} onPress={cycleBand} />
-        {isTerminal && <Button key="close" label="Close" hotkey="x" role="dismiss" onPress={close} />}
-      </Box>
-    )
-    const section = (title: string, ...children: unknown[]) => (
-      <Box flexDirection="column" gap={0}>
-        <Text bold>{title}</Text>
-        {children as RenderElement[]}
-      </Box>
-    )
-    // A label left, its figures right, across the pane.
-    const row = (key: string, label: RenderElement | string, value: string, note?: string) => (
-      <Box key={key} flexDirection="row">
-        {typeof label === 'string' ? <Text dimColor>{label}</Text> : label}
-        <Box flexGrow={1} />
-        <Text>
-          <Text bold>{value}</Text>
-          {note ? <Text dimColor> · {note}</Text> : ''}
-        </Text>
-      </Box>
-    )
-
-    if (!x) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Box flexDirection="row" gap={2} alignItems="center">
-            <Text bold>☀️ Context Forecast</Text>
-            <Box flexGrow={1} />
-            {actions}
-          </Box>
-          <Text dimColor>No reading yet: the forecast starts with Claude's first reply.</Text>
-        </Box>
-      )
-    }
-    const { f, r, now } = x
-    const px = panePx(cols)
-
-    // Stat tiles on a fixed grid: three across when the pane is wide enough.
-    const perRow = cols >= 54 ? 3 : 2
-    const tileWidth = Math.floor((cols - (perRow - 1) * 2) / perRow)
-    const tile = (key: string, label: string, value: string, sub: string) => (
-      <Box key={key} flexDirection="column" width={tileWidth}>
-        <Text dimColor>{label}</Text>
-        <Text bold>{value}</Text>
-        <Text dimColor wrap="truncate">
-          {sub}
-        </Text>
-      </Box>
-    )
-    const estimate = f.rateBasis > 0 ? `from ${f.rateBasis} turn${f.rateBasis === 1 ? '' : 's'}` : 'needs a turn of growth'
-    const tiles = [
-      tile('ctx', 'Context', `${f.windowPercent}%`, `${fmtCount(f.tokens)} of ${fmtCount(f.window)}`),
-      tile(
-        'left',
-        f.isCompactionLimit ? 'Until auto-compact' : 'Until full',
-        f.turnsLeft !== null ? `~${f.turnsLeft} turns` : fmtCount(Math.max(0, f.limit - f.tokens)),
-        f.turnsLeft !== null ? `${fmtCount(Math.max(0, f.limit - f.tokens))} · est. ${estimate}` : estimate,
-      ),
-      tile('rate', 'Average growth', f.rate !== null ? `+${fmtCount(f.rate)}/turn` : '—', f.perRequest !== null ? `+${fmtCount(f.perRequest)} per request` : ''),
-      f.lastTurn
-        ? tile('turn', 'Last turn', `${f.lastTurn.growth >= 0 ? '+' : ''}${fmtCount(f.lastTurn.growth)}`, `${f.lastTurn.requests} requests · ${fmtCount(f.lastTurn.output)} out`)
-        : null,
-      x.cacheHit !== null ? tile('cache', 'Cache hit', `${x.cacheHit}%`, 'last turn') : null,
-      r.usd !== null
-        ? tile('cost', 'Session cost', fmtUsd(r.usd), x.perHour !== null ? `${fmtUsd(x.perHour)}/h over ${fmtIn(x.elapsed)}` : fmtIn(x.elapsed))
-        : null,
-    ].filter(t => t !== null)
-    const tileRows: RenderElement[][] = []
-    for (let i = 0; i < tiles.length; i += perRow) tileRows.push(tiles.slice(i, i + perRow))
-
-    const last = f.outlook[f.outlook.length - 1]
-    const ahead = last
-      ? last.isPast
-        ? `⚠ Auto-compact expected within ${f.turnsLeft ?? 5} turn${f.turnsLeft === 1 ? '' : 's'} at this pace`
-        : `In 5 turns: ~${Math.round(last.fraction * 100)}% of the way to auto-compact · ${last.level.name}`
-      : 'A projection appears once the context has grown across a turn'
-
-    const used = r.categories.reduce((a, c) => a + c.tokens, 0)
-    const slices: Slice[] = r.categories.map((c, i) => ({ name: c.name, tokens: c.tokens, color: PALETTE[i % PALETTE.length]! }))
-
-    let chart: RenderElement
-    const bar = (key: string, fraction: number, color: string): RenderElement => {
-      if (e.surface === 'terminal') {
-        const [full, empty] = meter(fraction, Math.max(10, cols - 2))
-        return (
-          <Text key={key}>
-            <Text color={color}>{full}</Text>
-            <Text dimColor>{empty}</Text>
-          </Text>
-        )
-      }
-      const { Svg } = $.ui.resolve(e)
-      return <Svg key={key} source={meterSvg(fraction, color, px)} alt={`${Math.round(fraction * 100)}%`} />
-    }
-    let stack: RenderElement | null = null
-    if (e.surface === 'terminal') {
-      const { Raster } = $.ui.resolve(e)
-      chart = <Raster key="chart" {...chartCells(list, f.limit, Math.max(10, Math.min(80, cols - 2)), 7)} />
-      if (slices.length > 0) stack = <Raster key="stack" {...stackCells(slices, used, Math.max(10, cols - 2))} />
-    } else {
-      const { Svg } = $.ui.resolve(e)
-      chart = (
-        <Svg
-          key="chart"
-          source={chartSvg(list, f, px)}
-          alt={`Context over ${f.turns} turns with a five-turn projection; now ${Math.round(f.fraction * 100)}% of the way to auto-compact`}
-        />
-      )
-      if (slices.length > 0) {
-        stack = <Svg key="stack" source={stackSvg(slices, used, px)} alt={slices.map(sl => `${sl.name} ${fmtCount(sl.tokens)}`).join(', ')} />
-      }
-    }
-
-    const scaleText = (
-      <Text key="scale-text">
-        {LEVEL_SPANS.map((span, i) => (
-          <Text key={span.level.name}>
-            {i > 0 ? <Text dimColor> · </Text> : ''}
-            <Text bold={span.level.rank === f.level.rank} dimColor={span.level.rank !== f.level.rank}>
-              {span.level.icon} {span.level.name} {span.range}
-            </Text>
-          </Text>
-        ))}
-      </Text>
-    )
-
-    return (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="row" gap={1} alignItems="center">
-          {e.surface === 'terminal' ? (
-            <Text>{f.level.icon}</Text>
-          ) : (
-            (() => {
-              const { Svg } = $.ui.resolve(e)
-              return <Svg key="sky" source={skySvg(f.level, 32)} alt={f.level.name} width={32} height={32} />
-            })()
-          )}
-          <Text>
-            <Text bold>{f.level.name}</Text>
-            <Text dimColor> · {f.level.tag}</Text>
-          </Text>
-          <Box flexGrow={1} />
-          {actions}
-        </Box>
-
-        <Box flexDirection="column" gap={1}>
-          {tileRows.map((tr, i) => (
-            <Box key={`tiles${i}`} flexDirection="row" columnGap={2}>
-              {tr}
-            </Box>
-          ))}
-        </Box>
-
-        {section('Context forecast', chart, <Text key="ahead" dimColor>{ahead}</Text>)}
-
-        {r.limits.length > 0 &&
-          section(
-            'Plan usage',
-            ...r.limits.map(l => {
-              const reset = resetIn(l.resetsAt, now)
-              return (
-                <Box key={l.kind} flexDirection="column" marginBottom={1}>
-                  {row(`${l.kind}-row`, limitName(l.kind, true), `${l.percentUsed >= 75 ? '⚠ ' : ''}${Math.round(l.percentUsed)}%`, reset ? `resets in ${reset}` : undefined)}
-                  {bar(`${l.kind}-bar`, l.percentUsed / 100, severity(l.percentUsed))}
-                </Box>
-              )
-            }),
-          )}
-
-        {slices.length > 0 &&
-          section(
-            "What's in the context",
-            stack,
-            <Box key="gap" height={1} />,
-            ...slices.map(sl =>
-              row(
-                sl.name,
-                <Text>
-                  <Text color={sl.color}>■</Text>
-                  <Text dimColor> {sl.name}</Text>
-                </Text>,
-                fmtCount(sl.tokens),
-                `${Math.round((sl.tokens / used) * 100)}%`,
-              ),
-            ),
-          )}
-
-        {section(
-          'Weather scale',
-          e.surface === 'terminal'
-            ? scaleText
-            : (() => {
-                const { Svg } = $.ui.resolve(e)
-                return (
-                  <Svg
-                    key="scale"
-                    source={scaleSvg(f, px)}
-                    alt="Clear under 35% of the way to auto-compact, Fair to 55%, Cloudy to 70%, Showers to 85%, Storm beyond"
-                  />
-                )
-              })(),
-          <Text key="scale-note" dimColor>
-            At auto-compact, Claude Code summarizes the older conversation to free room; a rainbow follows a compaction.
-            Turn estimates use the average growth of recent turns.
-          </Text>,
-        )}
-      </Box>
-    )
+    const input = await panelInput($)
+    const panel = buildPanel(input)
+    const debug = await read($, debugAtom)
+    const surface = e.surface
+    return drawPane(panel, {
+      els: $.ui.resolve(e),
+      surface,
+      columns: e.props.bodyColumns,
+      view: debug === 'planner' ? 'planner' : await read($, viewAtom),
+      isDebugOn: await read($, debugOnAtom),
+      debug,
+      isConfirming: await read($, confirmAtom),
+      extra: await read($, extraAtom),
+      actions: {
+        openPlanner: () => void openPlanner($),
+        closePlanner: () => {
+          void update($, viewAtom, () => 'main')
+          void read($, debugAtom).then(d => (d === 'planner' ? update($, debugAtom, () => 'cloudy') : undefined))
+        },
+        toggleChip: id => {
+          const chip = panel?.planner?.chips.find(c => c.id === id)
+          if (chip) void update($, overridesAtom, o => ({ ...o, [id]: !chip.on }))
+          void update($, confirmAtom, () => false)
+        },
+        setExtra: text => {
+          void update($, extraAtom, () => text)
+          void update($, confirmAtom, () => false)
+        },
+        copyMcp: server => void copyMcp($, server, surface),
+        viewAgent: id => void viewAgent($, id),
+        copyCommand: () => void copyCommand($, surface),
+        compactNow: () => void compactNow($),
+        setDebug: state => void update($, debugAtom, () => state),
+        close: surface === 'terminal' ? () => void $.ui.close({ id: PANE }) : null,
+      },
+    })
   })
+}
+
+// Redraws the pane once a second while it shows a live cache countdown.
+// Redraws the pane when the cache countdown it shows changes: each minute,
+// and each second in the last five minutes.
+let shownCacheLabel = ''
+async function tickPane($: Api): Promise<void> {
+  try {
+    if ((await read($, debugAtom)) || !(await $.ui.panes()).some(p => p.id === PANE)) return
+    const c = await read($, cacheAtom)
+    if (!c || c.ttlMs === null) return
+    const left = c.ttlMs - ((await $.clock.now()) - c.lastRequestAt)
+    const label = left <= 0 ? 'cold' : cacheLeft(left)
+    if (label === shownCacheLabel) return
+    shownCacheLabel = label
+    $.ui.invalidate('ui.render')
+  } catch {
+    // A missed tick is harmless.
+  }
+}
+
+// Opens the planner and moves the focus to its first toggle, which scrolls it
+// into view.
+async function openPlanner($: Api): Promise<void> {
+  await update($, viewAtom, () => 'planner')
+  await update($, confirmAtom, () => false)
+  await $.ui.focus({ requestId: PANE, key: PLANNER_FOCUS }).catch(() => undefined)
+}
+
+// Disabling a server is /mcp's job: hand the person the command.
+async function copyMcp($: Api, server: string, surface: string): Promise<void> {
+  const r = await $.ui.copy({ text: '/mcp', surface: surface as never })
+  $.ui.toast(r.isCopied ? `Copied /mcp: paste it and turn off ${server}` : `Run /mcp and turn off ${server}`)
+}
+
+async function viewAgent($: Api, id: string): Promise<void> {
+  const r = await $.ui.view({ agentId: id }).catch((err: Error) => ({ deny: err.message }))
+  if (r.deny) $.ui.toast(`This subagent's transcript is not available: ${r.deny}`)
 }

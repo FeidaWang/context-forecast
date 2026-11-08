@@ -46,10 +46,11 @@ const turn = (tokens: number, extra: Partial<WeatherSample> = {}): WeatherSample
 test('levelOf maps the fraction to a condition at each boundary', async () => {
   const name = (f: number) => levelOf(f).name
   expect(name(0)).toBe('Clear')
-  expect(name(0.349)).toBe('Clear')
-  expect(name(0.35)).toBe('Fair')
-  expect(name(0.55)).toBe('Cloudy')
-  expect(name(0.7)).toBe('Showers')
+  expect(name(0.299)).toBe('Clear')
+  expect(name(0.3)).toBe('Cloudy')
+  expect(name(0.599)).toBe('Cloudy')
+  expect(name(0.6)).toBe('Rain')
+  expect(name(0.849)).toBe('Rain')
   expect(name(0.85)).toBe('Storm')
   expect(name(3)).toBe('Storm')
 })
@@ -118,7 +119,7 @@ test('forecast returns null without data', async () => {
   expect(forecast([turn(1000)], null)).toBeNull()
 })
 
-test('forecast estimates turns left from average growth', async () => {
+test('forecast estimates turns left from median growth', async () => {
   const f = forecast([turn(10_000), turn(20_000), turn(30_000)], reading())!
   expect(f.rate).toBe(10_000)
   expect(f.rateBasis).toBe(2)
@@ -143,9 +144,13 @@ test('forecast phrases: singular, at limit, and unknown growth', async () => {
   expect(at.turnsLeft).toBe(0)
   expect(turnsPhrase(at)).toBe('at compaction')
   const flat = forecast([turn(50_000), turn(50_000)], reading())!
-  expect(flat.rate).toBeNull()
+  expect(flat.rate).toBe(0)
   expect(flat.turnsLeft).toBeNull()
+  expect(flat.isPlenty).toBe(true)
   expect(turnsPhrase(flat)).toBeNull()
+  const none = forecast([turn(50_000)], reading())!
+  expect(none.rate).toBeNull()
+  expect(none.isPlenty).toBe(false)
   expect(growthRate([])).toEqual({ rate: null, basis: 0 })
 })
 

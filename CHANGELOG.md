@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0
+
+- Four conditions by share of the auto-compact threshold: Clear (<30%), Cloudy (30–60%), Rain (60–85%), Storm (85%+); Clearing after a compaction.
+- Growth per turn is now the median of the last ≤8 deltas since the last compaction, negative deltas excluded; over 99 turns reads "Plenty of room".
+- New forecast pane (≈360px): header, turns-left hero, segmented context bar with the compaction reserve, what's in context (with idle MCP server flag), prompt cache countdown, subagents, limits and API-equivalent cost.
+- Compact planner: Keep/Drop chips derived from the session, live `/compact` preview, after-compact estimate, best moment, Copy command and Compact now.
+- Next-move suggestions (Explore subagent, CLAUDE.md into a skill, new session after a topic shift), at most three, each only when its rule fires.
+- `/weather debug`: preview Clear, Cloudy, Storm and the planner with fixture data.
+- A compaction (any trigger) restarts the forecast from the size it left.
+- Pane follows the new two-card design: main card (header, hero and bar as one block, context, cache, subagents, limits, compact) and planner card (chips, instructions, estimate, actions, next move); secondary labels removed (see AGENTS.md).
+- Interaction: the planner opens in view (focus moves to it; the main card folds on a narrow pane); toggles read ☑/☒/☐; Compact now asks once; add your own instruction; Disable… copies `/mcp`; subagent rows open their transcript; calmer cache countdown; debug picker.
+- `/weather debug <state>` jumps to a preview; where another plugin holds `/weather`, the command registers as `/context-forecast`.
+
 ## 0.1.5
 
 - Add privacy policy, support, and documentation links to the manifest.

@@ -99,7 +99,7 @@ function rain(xs: readonly number[], y: number, hasSplash: boolean): string {
 
 // The drawing of a condition on a 32-unit square, for skySvg or a parent SVG.
 export function skyBody(level: Level): string {
-  switch (level.rank) {
+  switch (level.art) {
     case 0:
       return sun(16, 16, 6.2) + sparkle(26, 7, 1.8, 0) + sparkle(6, 25, 1.4, 1.2) + sparkle(27, 24, 1.2, 2)
     case 1:
@@ -154,7 +154,7 @@ const SUN_PULSE = [0xf29b00, 0xffc533, 0xffe9a0, 0xffc533]
 const RAINBOW = [0xef5350, 0xffb300, 0x43a047, 0x1e88e5]
 
 function frame(level: Level, n: number): Cell[] {
-  switch (level.rank) {
+  switch (level.art) {
     case 0:
       return [sunC(SUN_PULSE[n % 4]!), n % 4 === 2 ? ['·', 0xfff3c4] : BLANK, BLANK]
     case 1:

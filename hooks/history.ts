@@ -73,3 +73,44 @@ export function parseTranscript(text: string): WeatherSample[] {
 export function transcriptPath(configDir: string, cwd: string, sessionId: string): string {
   return `${configDir}/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`
 }
+
+// The cache lifetime the latest main-thread write used, read off the
+// transcript's `usage.cache_creation` split (1h vs 5m writes), with when that
+// response came back. Null when no response wrote to the cache.
+export function lastCacheTtl(text: string): { ttlMs: number; at: number } | null {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!
+    if (!line.includes('"cache_creation"') || !line.startsWith('{')) continue
+    let entry: { type?: string; isSidechain?: boolean; timestamp?: string; message?: { usage?: { cache_creation?: Record<string, number> } } }
+    try {
+      entry = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (entry.type !== 'assistant' || entry.isSidechain) continue
+    const cc = entry.message?.usage?.cache_creation
+    if (!cc) continue
+    const at = entry.timestamp ? Date.parse(entry.timestamp) || 0 : 0
+    if ((cc.ephemeral_1h_input_tokens ?? 0) > 0) return { ttlMs: 3_600_000, at }
+    if ((cc.ephemeral_5m_input_tokens ?? 0) > 0) return { ttlMs: 300_000, at }
+  }
+  return null
+}
+
+// A subagent's own transcript: the largest request's input side, the context
+// it worked in.
+export function subagentPeak(text: string): number {
+  let peak = 0
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('{') || !line.includes('"usage"')) continue
+    try {
+      const u = (JSON.parse(line) as { type?: string; message?: { usage?: Record<string, number> } }).message?.usage
+      if (!u) continue
+      peak = Math.max(peak, (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0))
+    } catch {
+      // A torn line: skip it.
+    }
+  }
+  return peak
+}

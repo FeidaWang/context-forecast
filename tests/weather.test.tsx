@@ -122,7 +122,7 @@ test('band and forecast draw on terminal and desktop', async ($, on) => {
     expect(await pane.find({ type: 'Text', text: "What's in context" })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /Messages and tool results/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /5-hour session/ })).toBeDefined()
-    expect(await pane.find({ type: 'Text', text: /~\$1\.23 API-equivalent/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /~\$1\.23/ })).toBeDefined()
     expect(await pane.find({ key: 'compact' })).toBeDefined()
     if (surface === 'desktop') {
       // The context bar, the limit meter and the hairlines.
@@ -260,7 +260,7 @@ test('debug preview: each state draws; the planner builds, copies and compacts',
     await pane.press({ key: 'compact' })
     expect(await pane.find({ type: 'Text', text: 'Compact planner' })).toBeDefined()
     // The way back leads the planner, worded as where it goes.
-    expect(await pane.find({ key: 'back' })).toMatchObject({ props: { label: '‹ Back to forecast' } })
+    expect(await pane.find({ key: 'back' })).toMatchObject({ props: { label: '‹ Back' } })
     // The main card stays in view above (or beside) the planner.
     expect(await pane.find({ type: 'Text', text: 'Storm' })).toBeDefined()
     // Chips are toggles with a check, apart from the primary action.
@@ -279,7 +279,7 @@ test('debug preview: each state draws; the planner builds, copies and compacts',
     expect(await pane.find({ type: 'Text', text: /Drop raw search output and file dumps\. Keep the API contract\./ })).toBeDefined()
     // Compact now asks once before it acts, and a preview never compacts.
     await pane.press({ key: 'compact-now' })
-    expect(await pane.find({ key: 'compact-now' })).toMatchObject({ props: { label: expect.stringMatching(/^Confirm · /) } })
+    expect(await pane.find({ key: 'compact-now' })).toMatchObject({ props: { label: 'Confirm compact' } })
     await pane.press({ key: 'compact-now' })
     expect(compacted).toBeUndefined()
     await pane.input({ key: 'extra', text: '' })

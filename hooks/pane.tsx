@@ -237,13 +237,10 @@ export function drawPane(p: Panel | null, x: PaneContext): RenderElement {
   const isFolded = showPlanner && !isWide
   const cards: RenderElement[] = [mainCard(p, x, cells, { withFooter: !showPlanner, isFolded })]
   if (isFolded) cards.push(k.rule('cards-rule'))
-  if (showPlanner) cards.push(plannerCard(p, x, cells, { withBack: isWide }))
-  // Stacked, the way back leads the whole pane, where the eye starts.
-  const back = isFolded ? backButton(x) : null
+  if (showPlanner) cards.push(plannerCard(p, x, cells))
   return (
     <Box flexDirection="column" gap={1}>
       {debugStrip}
-      {back}
       <Box flexDirection={isWide ? 'row' : 'column'} columnGap={CARD_GAP} rowGap={1} alignItems="flex-start">
         {cards}
       </Box>
@@ -310,11 +307,13 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
         <Text size="title" weight="semibold">
           {p.hero}
         </Text>
-        {k.prose('sub', sub, { dim: true })}
+        {o.isFolded ? null : k.prose('sub', sub, { dim: true })}
       </Box>
       <Box flexDirection="column" gap={0}>
         {bar}
-        {k.row('captions', k.prose('used', `${fmtKs(p.tokens)} used`, { dim: true }), p.reserve > 0 ? <Text dimColor>reserved for compact</Text> : null)}
+        {/* Folded above the planner, the figures it plans from are in the
+            header and the hero; the captions would only push it down. */}
+        {o.isFolded ? null : k.row('captions', k.prose('used', `${fmtKs(p.tokens)} used`, { dim: true }), p.reserve > 0 ? <Text dimColor>reserved for compact</Text> : null)}
       </Box>
     </Box>
   )
@@ -410,7 +409,7 @@ function mainCard(p: Panel, x: PaneContext, cells: number, o: { withFooter: bool
             {k.meter(`limit-${l.kind}-bar`, l.percent / 100, limitColor(l.percent))}
           </Box>
         ))}
-        {p.usd !== null && k.row('cost', 'This session', `~$${p.usd.toFixed(2)} API-equivalent`)}
+        {p.usd !== null && k.row('cost', 'API cost', `~$${p.usd.toFixed(2)}`)}
       </Box>
     ) : null
 
@@ -448,10 +447,10 @@ export function chipMark(side: 'keep' | 'drop', on: boolean): string {
 
 function backButton(x: PaneContext): RenderElement {
   const { Button } = x.els
-  return <Button key="back" label="‹ Back to forecast" plain hotkey={x.surface === 'terminal' ? 'b' : undefined} onPress={x.actions.closePlanner} />
+  return <Button key="back" label="‹ Back" plain dimColor role="dismiss" hotkey={x.surface === 'terminal' ? 'b' : undefined} onPress={x.actions.closePlanner} />
 }
 
-function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boolean }): RenderElement {
+function plannerCard(p: Panel, x: PaneContext, cells: number): RenderElement {
   const { Box, Text, Button } = x.els
   const k = kit(x, cells)
   const pl = p.planner!
@@ -467,7 +466,8 @@ function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boo
     return (
       <Box key={side} flexDirection="column" gap={0}>
         <Text dimColor>{label}</Text>
-        <Box flexDirection="row" flexWrap="wrap" columnGap={2} rowGap={0}>
+        {/* One a line: the boxes line up and every label starts at one edge. */}
+        <Box flexDirection="column" gap={0}>
           {list.map(chip)}
         </Box>
       </Box>
@@ -476,13 +476,13 @@ function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boo
   const compactLabel = !pl.canCompact
     ? 'Compact after this turn'
     : x.isConfirming
-      ? `Confirm · ${fmtKs(pl.before)} → ~${fmtKs(pl.after)}`
+      ? 'Confirm compact'
       : 'Compact now'
   const plan = (
     <Box key="plan" flexDirection="column" gap={1}>
-      {/* Beside the main card, the way back leads this card. */}
-      {o.withBack ? backButton(x) : null}
-      {k.title('planner-title', 'Compact planner', null, 'minimize')}
+      {/* Copy heads the card it copies from, leaving the instructions the
+          box's full width. */}
+      {k.title('planner-title', 'Compact planner', <Button key="copy" label="Copy" plain dimColor onPress={x.actions.copyCommand} />, 'minimize')}
       {chips('keep', 'Keep')}
       {chips('drop', 'Drop')}
       <Box key="preview" flexDirection="column" paddingX={1} borderStyle="round" borderDimColor>
@@ -502,13 +502,6 @@ function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boo
         {k.row('after', 'Estimated after compact', `${fmtKs(pl.before)} → ~${fmtKs(pl.after)}`)}
         {k.row('best', 'Best moment', k.prose('best-v', pl.best.text, pl.best.isGood ? { color: GOOD } : { dim: true }))}
       </Box>
-      {/* A button sizes to its label, so the pair holds the column's two edges. */}
-      <Box key="planner-buttons" flexDirection="row" columnGap={1}>
-        <Button key="copy" label="Copy command" variant="secondary" onPress={x.actions.copyCommand} />
-        <Box flexGrow={1} />
-        <Button key="compact-now" label={compactLabel} variant="primary" onPress={x.actions.compactNow} />
-      </Box>
-      {x.isConfirming && k.prose('confirm-note', 'Compacting replaces the conversation with a summary; it cannot be undone.', { dim: true })}
     </Box>
   )
   const moves =
@@ -523,5 +516,17 @@ function plannerCard(p: Panel, x: PaneContext, cells: number, o: { withBack: boo
         ))}
       </Box>
     ) : null
-  return k.stack('planner', [plan, moves], cells)
+  // Last, as the main card's Close and Plan compact: the way back at the
+  // left, the one action at the right.
+  const footer = (
+    <Box key="planner-footer" flexDirection="column" gap={1}>
+      {x.isConfirming && k.prose('confirm-note', 'Compacting replaces the conversation with a summary; it cannot be undone.', { dim: true })}
+      <Box key="planner-buttons" flexDirection="row" columnGap={1}>
+        {backButton(x)}
+        <Box flexGrow={1} />
+        <Button key="compact-now" label={compactLabel} variant="primary" onPress={x.actions.compactNow} />
+      </Box>
+    </Box>
+  )
+  return k.stack('planner', [plan, moves, footer], cells)
 }

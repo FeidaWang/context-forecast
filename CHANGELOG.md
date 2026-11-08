@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Planner footer mirrors the main card: ‹ Back at the bottom left (as Close), Compact now at the right; Copy moved beside the planner's title; toggles one a line; the folded forecast above keeps only header, hero and bar; the confirm button reads "Confirm compact" (the size is in the estimate row above).
+- Session cost reads "API cost ~$1.23".
+
 ## 0.2.1
 
 - Band redesign: one line (condition · turns until auto-compact, pressable), gauge with a neutral threshold mark until Rain, limits only past 50% in a fixed order, Plan compact in Rain and Storm, "Compacted · before → after" after a compaction; cost moved to the pane; Cloudy is now calm blue.

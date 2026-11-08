@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- Directory review: the pane's drawing constants are camelCase, so no `${NAME}` in its SVG templates reads as an environment placeholder; `displayName` restored in plugin.json.
+
 ## 0.2.4
 
 - Directory review fixes: the transcript path now comes from Claude Code's own hook input (`transcript_path`), so no environment variable is read; no `h` names in JSX files; `displayName` dropped from plugin.json.

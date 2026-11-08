@@ -6,7 +6,7 @@ import type { EngineInterface, RenderElement } from 'claude-code'
 
 import type { DebugState, PaneView } from '../types'
 import { BAD, GOOD, isAlertRank } from './forecast'
-import { RESERVE_COLOR, fmtK, fmtK1, fmtKs, isAppServer } from './insights'
+import { RESERVE_COLOR as reserveColor, fmtK, fmtK1, fmtKs, isAppServer } from './insights'
 import type { Panel } from './panel'
 import { skySvg } from './sky'
 import { iconSvg } from './icons'
@@ -22,14 +22,14 @@ type InputEl = ReturnType<Api['ui']['resolve']> extends infer T ? (T extends { I
 // content is 41 cells.
 export const MAX_CELLS = 41
 const CARD_GAP = 4
-const HAIRLINE = '#8a8f98'
+const hairline = '#8a8f98'
 // Claude's own orange: the model's name and the plan limits.
 const CLAUDE = '#d97757'
 // Graphics are drawn this wide and capped to their slot: with no `width` on
 // the Svg, the surface sizes the box to the slot and `preserveAspectRatio`
 // "none" stretches the drawing across it, so bars match the text column.
-const STRETCH = 4000
-const VB = 1000
+const stretchWidth = 4000
+const viewWidth = 1000
 // The first element the planner focuses when it opens, so it scrolls into view.
 export const PLANNER_FOCUS = 'chip-task'
 
@@ -69,11 +69,11 @@ export function cacheLeft(ms: number): string {
 }
 
 const stretchOpen = (height: number) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${STRETCH}" height="${height}" viewBox="0 0 ${VB} ${height}" preserveAspectRatio="none">`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${stretchWidth}" height="${height}" viewBox="0 0 ${viewWidth} ${height}" preserveAspectRatio="none">`
 
 // A half-pixel rule across the column (1 device pixel on a 2x screen).
 export function hairlineSvg(): string {
-  return `${stretchOpen(1)}<rect width="${VB}" height=".5" fill="${HAIRLINE}" fill-opacity=".7"/></svg>`
+  return `${stretchOpen(1)}<rect width="${viewWidth}" height=".5" fill="${hairline}" fill-opacity=".7"/></svg>`
 }
 
 
@@ -81,8 +81,8 @@ export function hairlineSvg(): string {
 // between segments, the compaction reserve gray at the end.
 export function contextBarSvg(p: Panel): string {
   const barH = 8
-  const parts = [stretchOpen(barH), `<rect width="${VB}" height="${barH}" fill="${HAIRLINE}" fill-opacity=".16"/>`]
-  const scale = VB / Math.max(1, p.barMax)
+  const parts = [stretchOpen(barH), `<rect width="${viewWidth}" height="${barH}" fill="${hairline}" fill-opacity=".16"/>`]
+  const scale = viewWidth / Math.max(1, p.barMax)
   let x = 0
   for (const g of p.groups) {
     const gw = g.tokens * scale
@@ -91,22 +91,22 @@ export function contextBarSvg(p: Panel): string {
   }
   if (p.reserve > 0) {
     const rw = p.reserve * scale
-    parts.push(`<rect x="${(VB - rw).toFixed(2)}" width="${rw.toFixed(2)}" height="${barH}" fill="${RESERVE_COLOR}" fill-opacity=".55"/>`)
+    parts.push(`<rect x="${(viewWidth - rw).toFixed(2)}" width="${rw.toFixed(2)}" height="${barH}" fill="${reserveColor}" fill-opacity=".55"/>`)
   }
   parts.push('</svg>')
   return parts.join('')
 }
 
 export function meterSvg(fraction: number, color: string): string {
-  const fw = Math.min(1, Math.max(0, fraction)) * VB
-  return `${stretchOpen(4)}<rect width="${VB}" height="4" fill="${HAIRLINE}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="4" fill="${color}"/></svg>`
+  const fw = Math.min(1, Math.max(0, fraction)) * viewWidth
+  return `${stretchOpen(4)}<rect width="${viewWidth}" height="4" fill="${hairline}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="4" fill="${color}"/></svg>`
 }
 
 // A short share bar: a fixed 44px, small enough to sit beside a value.
 export function shareSvg(fraction: number, color: string): string {
   const w = 44
   const fw = Math.max(fraction > 0 ? 2 : 0, Math.min(1, fraction) * w)
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="6" viewBox="0 0 ${w} 6"><rect width="${w}" height="6" rx="3" fill="${HAIRLINE}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="6" rx="3" fill="${color}"/></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="6" viewBox="0 0 ${w} 6"><rect width="${w}" height="6" rx="3" fill="${hairline}" fill-opacity=".18"/><rect width="${fw.toFixed(1)}" height="6" rx="3" fill="${color}"/></svg>`
 }
 
 // The usage bars wear Claude's orange until a limit nears its end.
